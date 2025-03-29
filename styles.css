@@ -1,0 +1,53 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #ffffff; /* Set the background to white */
+    color: #333; /* Keeping text color dark grey for readability */
+}
+
+header, footer {
+    background-color: #000000; /* Set background to black */
+    color: #ffffff; /* Text color to white for contrast */
+    text-align: center;
+    padding: 1em;
+}
+
+nav {
+    background-color: #e85c27; /* Orange background for the navigation bar */
+    padding: 0.5em 0;
+}
+
+nav ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    text-align: center;
+}
+
+nav ul li {
+    display: inline;
+    margin-right: 20px;
+}
+
+nav ul li a {
+    color: white; /* White text links for visibility against orange */
+    text-decoration: none;
+    padding: 0.5em 1em;
+}
+
+main {
+    padding: 20px;
+    text-align: center;
+}
+
+section {
+    margin-bottom: 20px;
+}
+
+/* Hover effects for links for better user interaction */
+nav ul li a:hover {
+    background-color: #ffffff;
+    color: #e85c27;
+    transition: color 0.3s, background-color 0.3s;
+}
