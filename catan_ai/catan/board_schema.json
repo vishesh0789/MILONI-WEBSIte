@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "catan-board-v1",
+  "title": "Catan board + initial placement state (Colonist.io base map)",
+  "type": "object",
+  "required": ["schema_version", "hexes", "ports", "robber_hex", "players"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"type": "string"},
+    "layout": {
+      "type": "object",
+      "properties": {
+        "orientation": {"const": "pointy"},
+        "radius": {"const": 2}
+      }
+    },
+    "hexes": {
+      "type": "array", "minItems": 19, "maxItems": 19,
+      "items": {
+        "type": "object",
+        "required": ["id", "q", "r", "terrain", "number"],
+        "properties": {
+          "id": {"type": "integer", "minimum": 0, "maximum": 18},
+          "q": {"type": "integer", "minimum": -2, "maximum": 2},
+          "r": {"type": "integer", "minimum": -2, "maximum": 2},
+          "s": {"type": "integer", "minimum": -2, "maximum": 2},
+          "terrain": {"enum": ["forest", "hills", "pasture", "fields", "mountains", "desert"]},
+          "resource": {"enum": ["wood", "brick", "sheep", "wheat", "ore", null]},
+          "number": {"oneOf": [{"type": "null"}, {"enum": [2, 3, 4, 5, 6, 8, 9, 10, 11, 12]}]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "ports": {
+      "type": "array", "maxItems": 9,
+      "items": {
+        "type": "object",
+        "required": ["type", "nodes"],
+        "properties": {
+          "type": {"enum": ["3:1", "wood", "brick", "sheep", "wheat", "ore"]},
+          "nodes": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 53},
+                    "minItems": 2, "maxItems": 2},
+          "edge": {"type": "integer", "minimum": 0, "maximum": 71}
+        }
+      }
+    },
+    "robber_hex": {"type": "integer", "minimum": 0, "maximum": 18},
+    "turn_order": {"type": "array", "items": {"enum": ["red", "blue", "orange", "white"]}},
+    "current_player": {"enum": ["red", "blue", "orange", "white"]},
+    "turn_number": {"type": "integer", "minimum": 1},
+    "perspective": {"enum": ["red", "blue", "orange", "white", null]},
+    "starting_resources": {"enum": ["second_settlement", "none"],
+                           "description": "grant setup income from settlements[1] when 'hands' is absent"},
+    "players": {
+      "type": "array", "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["color", "settlements", "roads"],
+        "properties": {
+          "color": {"enum": ["red", "blue", "orange", "white"]},
+          "settlements": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 53},
+                          "description": "placement order matters: [first, second]"},
+          "cities": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 53}},
+          "roads": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 71}},
+          "dev_cards": {"type": "integer", "minimum": 0},
+          "knights_played": {"type": "integer", "minimum": 0},
+          "vp_cards": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "hands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "wood": {"type": "integer"}, "brick": {"type": "integer"}, "sheep": {"type": "integer"},
+          "wheat": {"type": "integer"}, "ore": {"type": "integer"}
+        }
+      }
+    },
+    "meta": {"type": "object"}
+  }
+}

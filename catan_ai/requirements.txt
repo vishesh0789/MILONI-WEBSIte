@@ -1,0 +1,8 @@
+# core (state manager + AI engine) needs only the Python 3.10+ standard library
+numpy>=1.24            # vision
+opencv-python-headless>=4.8   # vision
+pytest>=7              # tests
+# optional OCR backends for number tokens (template matching is the built-in fallback)
+# easyocr>=1.7
+# pytesseract>=0.3     # + the tesseract binary
+# scipy>=1.10          # optimal quota assignment (greedy fallback built in)
