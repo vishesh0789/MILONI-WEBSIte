@@ -331,3 +331,38 @@ def test_vision_roundtrip_on_synthetic_screenshot(data: dict, size: int) -> None
         for key in ("settlements", "cities", "roads"):
             assert sorted(want.get(key, [])) == sorted(got[key]), (want["color"], key)
     GameState.from_dict(out)  # extracted JSON loads into the state manager
+
+
+# -- GUI server -------------------------------------------------------------------
+
+
+def test_gui_server_api(data: dict) -> None:
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from catan.gui_server import Session, make_handler
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Session(GameState.from_dict(data))))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(path: str, body: dict) -> dict:
+        req = urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    try:
+        assert b"Catan Analysis Board" in urllib.request.urlopen(base + "/").read()
+        state = json.loads(urllib.request.urlopen(base + "/api/state").read())
+        assert len(state["tiles"]) == 19 and len(state["topology"]["nodes"]) == 54
+        res = post("/api/command", {"line": "d 8"})
+        assert res["ok"] and res["state"]["last_roll"] == 8
+        assert not post("/api/command", {"line": "b red s 0"})["ok"]  # illegal -> error, state intact
+        res = post("/api/analyze", {"rollouts": 4, "top_k": 3})
+        moves = res["analysis"]["moves"]
+        assert res["ok"] and 1 <= len(moves) <= 3 and res["analysis"]["heatmap"]
+        res = post("/api/apply", {"events": moves[0]["events"], "label": moves[0]["label"]})
+        assert res["ok"]
+        assert post("/api/undo", {})["state"]["can_undo"] in (True, False)
+    finally:
+        server.shutdown()

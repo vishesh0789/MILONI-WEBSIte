@@ -566,29 +566,37 @@ class GameState:
         """Parse and apply one short command; returns a human-readable result."""
         event = parse_command(line, self)
         if event["type"] == "undo":
-            if not self._history:
-                return "nothing to undo"
-            prev = self._history.pop()
-            hist = self._history
-            self.__dict__.update(prev.__dict__)
-            self._history = hist
-            return "undone"
+            return "undone" if self.undo() else "nothing to undo"
         if event["type"] in ("show", "noop"):
             return self.summary() if event["type"] == "show" else ""
+        msg = self.apply_events([event])
+        self.log.append(f"T{self.turn_number} {line.strip()}")
+        return msg
+
+    def undo(self) -> bool:
+        if not self._history:
+            return False
+        prev = self._history.pop()
+        hist = self._history
+        self.__dict__.update(prev.__dict__)
+        self._history = hist
+        return True
+
+    def apply_events(self, events: Sequence[Mapping[str, Any]]) -> str:
+        """Apply events atomically as one undoable step (rolled back on any error)."""
         snapshot = self.clone()
         n_warn = len(self.belief.warnings)
         history = self._history
         try:
-            msg = self.apply_event(event)
+            msg = "; ".join(m for m in (self.apply_event(ev) for ev in events) if m)
         except Exception:
-            self.__dict__.update(snapshot.__dict__)  # roll back the partial event
+            self.__dict__.update(snapshot.__dict__)  # roll back the partial step
             self._history = history
             raise
         self._history = (history + [snapshot])[-50:]
         new_warn = self.belief.warnings[n_warn:]
         if new_warn:
             msg += "\n  ! " + "\n  ! ".join(new_warn)
-        self.log.append(f"T{self.turn_number} {line.strip()}")
         return msg
 
     def apply_event(self, ev: Mapping[str, Any]) -> str:

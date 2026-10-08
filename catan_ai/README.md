@@ -9,6 +9,7 @@ A modular Python system for 4-player Settlers of Catan on the Colonist.io base m
 | 2. State | `catan/state_manager.py` | Short-command input, bank/hand tracking, hidden-information belief |
 | 3. AI | `catan/catan_engine.py` | Heuristic evaluation + Monte Carlo rollouts → top-N moves |
 | Schema | `catan/board_schema.json` | JSON Schema for the extracted board/state |
+| GUI | `catan/gui_server.py`, `catan/gui/index.html` | Analysis board in the browser (Stockfish/lichess style) |
 | Demo | `run_demo.py`, `examples/example_board.json` | Load → `d 6`, `d 8`, `d 7` → AI top 3 |
 
 ```
@@ -25,12 +26,36 @@ cd catan_ai
 pip install -r requirements.txt          # numpy + opencv for vision; core runs on stdlib only
 python run_demo.py                       # example board, dice sequence, AI advice
 python run_demo.py --vision              # also renders a synthetic screenshot and extracts it
-python -m pytest                         # 26 tests
+python -m pytest                         # 27 tests
+python -m catan.gui_server --me red      # analysis board GUI at http://127.0.0.1:8765
 
 # live play
 python -m catan.vision_extractor shot.png -o board.json --debug overlay.png
 python -m catan.state_manager board.json --me red
 ```
+
+## Analysis board GUI
+
+```bash
+python -m catan.gui_server                     # example board
+python -m catan.gui_server board.json --me red # your extracted board, you are red
+```
+
+A local server (standard library only) opens a browser page that drives the same `GameState` and
+`CatanEngine` as the CLI:
+
+* **Board.** Tiles, number tokens with pips, ports, roads, settlements, cities and the robber.
+  Engine overlays show the top 3 moves as numbered badges (node, edge or tile), the best road plan
+  as a dashed path with a ghost settlement, and a heatmap of the best open spots.
+* **Win bar.** Monte Carlo win % for each player, stacked, with yours at the bottom.
+* **Engine panel.** Top 5 lines with win %, detail and a **▶ play** button. Live analysis re-runs
+  after every move. Depth runs from instant (heuristic only) to deep (200 rollouts); the header
+  shows the ± noise.
+* **Click to play.** Click a corner to build a settlement (or a city on your own settlement), an
+  edge for a road, a tile to move the robber, then pick who to steal from. Dice buttons, end turn,
+  undo, and the same command line as the CLI. Click a player row to make them the acting player.
+* **Load.** Drop a Colonist screenshot on the board (runs the vision extractor), or load or save
+  game JSON.
 
 ## Hex coordinate system and numbering
 

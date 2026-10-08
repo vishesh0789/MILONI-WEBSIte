@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catan Analysis Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: analysis-board triptych — win bar | board | engine & game panel (stacks on narrow screens) */
+:root {
+  --bg: #eef1f4; --panel: #ffffff; --panel-2: #f4f6f9; --line: #d6dce4; --fg: #1b2430; --muted: #5d6b7c;
+  --accent: #2f9e6e; --accent-2: #d9a520; --accent-3: #6d86a8; --danger: #c8443c;
+  --sea: #2a6f9e; --sea-deep: #1d5479; --shadow: 0 1px 2px rgba(20,30,45,.08), 0 6px 20px rgba(20,30,45,.06);
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "IBM Plex Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14181e; --panel: #1c2129; --panel-2: #222832; --line: #2f3742; --fg: #e5e9ef; --muted: #93a0b0;
+    --accent: #4cc38a; --accent-2: #e8b93c; --accent-3: #8aa2c4; --danger: #e5635a;
+    --sea: #1f5a82; --sea-deep: #173f5d; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--body); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 12px 20px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand { font: 800 20px/1 var(--display); letter-spacing: -.01em; display: flex; align-items: center; gap: 10px; }
+.brand svg { flex: none; }
+.status { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; white-space: nowrap; }
+.chip b { font-weight: 600; }
+.chip.phase-robber, .chip.phase-discard { border-color: var(--danger); color: var(--danger); }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.35); flex: none; }
+.spacer { flex: 1; }
+.tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btn { border: 1px solid var(--line); background: var(--panel-2); padding: 6px 12px; border-radius: 8px; }
+.btn:hover { border-color: var(--accent-3); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn:disabled { opacity: .45; cursor: default; }
+label.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); gap: 16px; align-items: start;
+  padding-block: 16px; padding-inline: 20px; max-width: 1500px; margin: 0 auto; }
+@media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+.boardrow { display: flex; gap: 10px; align-items: stretch; }
+.boardrow svg { flex: 1; min-width: 0; }
+
+/* win bar */
+.evalbar { position: relative; flex: 0 0 26px; border-radius: 6px; overflow: hidden; background: var(--panel-2);
+  border: 1px solid var(--line); display: flex; flex-direction: column-reverse; }
+.evalbar .seg { transition: flex-basis .5s ease; display: flex; align-items: flex-end; justify-content: center; }
+.evalbar .lbl { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font: 600 11px var(--mono);
+  color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.7); }
+
+/* board */
+.boardwrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 8px; min-width: 0; }
+.boardwrap.drop { outline: 3px dashed var(--accent); }
+svg#board { width: 100%; height: auto; display: block; max-height: calc(100vh - 230px); user-select: none; }
+.hit-node { fill: transparent; cursor: pointer; }
+.hit-node:hover { fill: rgba(255,255,255,.35); stroke: #fff; stroke-width: 2; }
+.hit-edge { stroke: transparent; stroke-width: 16; stroke-linecap: round; cursor: pointer; }
+.hit-edge:hover { stroke: rgba(255,255,255,.35); }
+.hit-hex { fill: transparent; cursor: pointer; }
+.hit-hex:hover { fill: rgba(255,255,255,.10); }
+.ids text { font: 600 10px var(--mono); pointer-events: none; }
+@keyframes pulse { 0%,100% { opacity: .95 } 50% { opacity: .45 } }
+.best-pulse { animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .best-pulse { animation: none; } .evalbar .seg { transition: none; } }
+
+.actionbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.dice { display: flex; gap: 4px; flex-wrap: wrap; }
+.dice button { width: 34px; height: 32px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2);
+  font: 600 13px var(--mono); }
+.dice button.hot { color: var(--danger); }
+.dice button.seven { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.cmd { flex: 1 1 260px; display: flex; gap: 6px; min-width: 0; }
+.cmd input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel-2); font-family: var(--mono); }
+.hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.hint kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+
+.popover { position: absolute; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 170px; }
+.popover h4 { margin: 2px 4px 4px; font: 600 12px var(--body); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.popover button { text-align: left; border: 0; background: transparent; padding: 6px 8px; border-radius: 6px; display: flex; gap: 8px; align-items: center; }
+.popover button:hover { background: var(--panel-2); }
+
+/* side panel */
+.side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); min-width: 0; }
+.card > .hd { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.card > .hd h2 { margin: 0; font: 700 14px var(--display); letter-spacing: .01em; }
+.card > .hd .meta { margin-left: auto; font: 12px var(--mono); color: var(--muted); }
+.card > .bd { padding: 10px 14px; }
+
+.verdict { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; align-items: baseline; }
+.verdict .big { font: 800 30px/1 var(--display); font-variant-numeric: tabular-nums; }
+.verdict .who { font-size: 12px; color: var(--muted); }
+.verdict .best { grid-column: 1 / -1; margin-top: 8px; font-weight: 600; }
+.lines { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lines li { display: grid; grid-template-columns: 26px 56px minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  padding: 7px 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid transparent; }
+.lines li:hover { border-color: var(--line); }
+.rank { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: 700 12px var(--mono); color: #10202a; }
+.win { font: 600 13px var(--mono); font-variant-numeric: tabular-nums; }
+.mv { min-width: 0; }
+.mv .t { font-weight: 600; overflow-wrap: anywhere; }
+.mv .d { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.play { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+.play:hover { border-color: var(--accent); color: var(--accent); }
+.analyzing { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+.spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.notes { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+table.players { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.players td, .players th { padding: 7px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.players th { font: 600 11px var(--body); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.players tr:last-child td { border-bottom: 0; }
+.players tr.turn td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.players tr { cursor: pointer; }
+.players tr.actor td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.pname { display: flex; gap: 6px; align-items: center; font-weight: 600; text-transform: capitalize; }
+.vp { font: 700 16px var(--display); }
+.hand { display: flex; gap: 3px; flex-wrap: wrap; }
+.res { min-width: 26px; padding: 1px 4px; border-radius: 4px; font: 600 11px var(--mono); text-align: center; color: #12202a; }
+.res.zero { opacity: .28; }
+.tag { font: 600 10px var(--mono); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.tag.on { color: var(--accent); border-color: var(--accent); }
+.sub { font-size: 11.5px; color: var(--muted); }
+
+.feed { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; font-size: 12.5px; }
+.feed li { padding: 5px 0; border-bottom: 1px dashed var(--line); display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 6px; }
+.feed li .n { font: 11px var(--mono); color: var(--muted); padding-top: 1px; }
+.feed li code { font: 600 12px var(--mono); }
+.feed li .m { color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
+.feed li.err code, .feed li.err .m { color: var(--danger); }
+
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
+  padding: 9px 14px; border-radius: 8px; font-size: 13px; box-shadow: var(--shadow); max-width: min(90vw, 560px); z-index: 50; }
+.banner { margin-bottom: 8px; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger); font-weight: 600; font-size: 13px; }
+details.help summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+details.help table { font-size: 12px; border-collapse: collapse; margin-top: 6px; }
+details.help td { padding: 3px 8px 3px 0; vertical-align: top; }
+details.help code { font: 12px var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg width="26" height="28" viewBox="0 0 26 28" aria-hidden="true"><polygon points="13,1 25,8 25,20 13,27 1,20 1,8" fill="#e7b93e" stroke="#8a6a1c" stroke-width="1.5"/><circle cx="13" cy="14" r="5" fill="#f6ead0"/><text x="13" y="17" text-anchor="middle" font-size="8" font-weight="700" fill="#c8443c">8</text></svg>
+    Catan Analysis Board
+  </div>
+  <div class="status" id="status"></div>
+  <div class="spacer"></div>
+  <div class="tools">
+    <label class="toggle" for="opt-live"><input type="checkbox" id="opt-live" checked> Live engine</label>
+    <select id="opt-depth" title="Monte Carlo rollouts per candidate move">
+      <option value="0">Depth: instant</option>
+      <option value="40">Depth: fast</option>
+      <option value="80" selected>Depth: normal</option>
+      <option value="200">Depth: deep</option>
+    </select>
+    <label class="toggle" for="opt-heat"><input type="checkbox" id="opt-heat" checked> Spot heatmap</label>
+    <label class="toggle" for="opt-ids"><input type="checkbox" id="opt-ids"> IDs</label>
+    <select id="opt-me" title="Your colour: your own hand is tracked exactly"></select>
+    <button class="btn" id="btn-new">New</button>
+    <button class="btn" id="btn-load">Load JSON</button>
+    <button class="btn" id="btn-shot">Read screenshot</button>
+    <button class="btn" id="btn-save">Save</button>
+    <input type="file" id="file-json" accept=".json,application/json" hidden>
+    <input type="file" id="file-img" accept="image/png,image/jpeg" hidden>
+  </div>
+</header>
+
+<main>
+  <section class="boardwrap" id="boardwrap">
+    <div id="banner"></div>
+    <div class="boardrow">
+      <div class="evalbar" id="evalbar" title="Win probability (Monte Carlo)"></div>
+      <svg id="board" viewBox="-560 -520 1120 1040" role="img" aria-label="Catan board"></svg>
+    </div>
+    <div class="actionbar">
+      <div class="dice" id="dice"></div>
+      <button class="btn" id="btn-next">End turn ⟶</button>
+      <button class="btn" id="btn-undo">Undo</button>
+      <form class="cmd" id="cmdform" autocomplete="off">
+        <input id="cmd" placeholder="command, e.g.  b blue s 24   ·   t w o   ·   r 11 red" spellcheck="false">
+        <button class="btn primary" type="submit">Run</button>
+      </form>
+    </div>
+    <div class="hint">Click a <b>corner</b> to build a settlement (or upgrade to a city), an <b>edge</b> for a road, a <b>tile</b> to move the robber. Builds go to the highlighted player in the table. <label class="toggle" for="opt-free"><input type="checkbox" id="opt-free"> free placement (setup)</label> · <kbd>/</kbd> focuses the command line</div>
+    <div id="popover-host"></div>
+  </section>
+
+  <aside class="side">
+    <section class="card" id="engine">
+      <div class="hd"><h2>Engine</h2><span class="meta" id="engine-meta"></span></div>
+      <div class="bd" id="engine-bd"></div>
+    </section>
+    <section class="card">
+      <div class="hd"><h2>Players</h2><span class="meta" id="bank"></span></div>
+      <div class="bd" style="padding-top:2px"><table class="players" id="players"></table></div>
+    </section>
+    <section class="card">
+      <div class="hd"><h2>Game log</h2></div>
+      <div class="bd">
+        <ul class="feed" id="feed"></ul>
+        <details class="help">
+          <summary>Command reference</summary>
+          <table>
+            <tr><td><code>d 8</code></td><td>dice roll</td></tr>
+            <tr><td><code>b red s 24</code></td><td>settlement · <code>c</code> city · <code>r 26-32</code> road · <code>dev</code></td></tr>
+            <tr><td><code>r 11 blue [o]</code></td><td>robber + steal (card if you saw it)</td></tr>
+            <tr><td><code>x blue 2w b</code></td><td>discard on a 7 (or <code>x blue 4</code>)</td></tr>
+            <tr><td><code>t w o</code> / <code>t 4w o</code></td><td>bank / port trade</td></tr>
+            <tr><td><code>tp red blue 2w o</code></td><td>player trade</td></tr>
+            <tr><td><code>p red knight</code></td><td>dev card: knight · mono w · yop o o · rb e1 e2 · vp</td></tr>
+            <tr><td><code>g red o</code> / <code>l red o</code></td><td>manual correction</td></tr>
+            <tr><td><code>n</code> · <code>u</code></td><td>end turn · undo</td></tr>
+          </table>
+        </details>
+      </div>
+    </section>
+  </aside>
+</main>
+<div id="toast-host"></div>
+
+<script>
+"use strict";
+const TERRAIN = { forest: "#2f7d45", hills: "#c4643a", pasture: "#94c25b", fields: "#e8b93e", mountains: "#8a96a2", desert: "#dcc69a" };
+const TERRAIN_DARK = { forest: "#24603a", hills: "#9c4c2b", pasture: "#739a45", fields: "#bf9325", mountains: "#6c7782", desert: "#b8a274" };
+const RES_COLOR = { wood: "#3f9a58", brick: "#d27548", sheep: "#a9d46e", wheat: "#f0c84f", ore: "#a3afba", "3:1": "#f4f1ea" };
+const RES_SHORT = { wood: "wo", brick: "br", sheep: "sh", wheat: "wh", ore: "or" };
+const PLAYER = { red: "#d63a3a", blue: "#2f6fdc", orange: "#f08a1c", white: "#f4f4f0" };
+const RANK = ["#4cc38a", "#e8b93c", "#8aa2c4", "#b58ad6", "#9aa5b1"];
+const PIPS = {2:1,3:2,4:3,5:4,6:5,8:5,9:4,10:3,11:2,12:1};
+const U = 100; // svg units per hex radius
+
+let S = null;          // game state from the server
+let A = null;          // latest analysis
+let stale = true;      // analysis is for an older state
+let actor = null;      // player who receives click-builds
+let actorPinned = false;
+let seq = 0, analyzing = false;
+const opt = { live: true, heat: true, ids: false, free: false, depth: 80 };
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pct = (x) => (x == null ? "—" : (x * 100).toFixed(1) + "%");
+
+async function api(path, body, raw) {
+  const init = body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": raw ? "application/octet-stream" : "application/json" },
+    body: raw ? body : JSON.stringify(body),
+  };
+  const r = await fetch(path, init);
+  return r.json();
+}
+
+function toast(msg, ms = 3200) {
+  const host = $("toast-host");
+  host.innerHTML = `<div class="toast" role="status">${esc(msg)}</div>`;
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => (host.innerHTML = ""), ms);
+}
+
+function setState(state) {
+  const turnChanged = !S || S.current !== state.current || S.turn !== state.turn;
+  S = state;
+  if (turnChanged) actorPinned = false;
+  if (!actorPinned) actor = S.current;
+  stale = true;
+  renderAll();
+  if (opt.live) analyze();
+}
+
+async function send(line) {
+  closePopover();
+  const res = await api("/api/command", { line });
+  if (!res.ok) { toast(res.error); if (res.state) { S = res.state; renderAll(); } return; }
+  if (res.message) toast(res.message.split("\n")[0]);
+  setState(res.state);
+}
+
+async function applyEvents(events, label) {
+  const res = await api("/api/apply", { events, label });
+  if (!res.ok) { toast(res.error); return; }
+  toast(res.message || label);
+  setState(res.state);
+}
+
+async function analyze() {
+  const id = ++seq;
+  analyzing = true; renderEngine();
+  const res = await api("/api/analyze", { player: actor, rollouts: opt.depth, top_k: 5 });
+  if (id !== seq) return;
+  analyzing = false;
+  if (!res.ok) { toast(res.error); renderEngine(); return; }
+  A = res.analysis; stale = false;
+  renderAll();
+}
+
+// ---------------------------------------------------------------- geometry
+const nxy = (n) => S.topology.nodes[n].xy.map((v) => v * U);
+const hxy = (h) => S.topology.hexes[h].xy.map((v) => v * U);
+function exy(e) { const [a, b] = S.topology.edges[e].nodes; const p = nxy(a), q = nxy(b); return [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]; }
+const pts = (arr) => arr.map((p) => p.map((v) => v.toFixed(1)).join(",")).join(" ");
+const nodeOwner = (n) => { for (const p of S.players) { if (p.settlements.includes(n)) return [p.color, "s"]; if (p.cities.includes(n)) return [p.color, "c"]; } return null; };
+
+function house(x, y, s, fill) {
+  const k = s;
+  return `<path d="M${x - k} ${y + k * .8} V${y - k * .15} L${x} ${y - k} L${x + k} ${y - k * .15} V${y + k * .8} Z" fill="${fill}" stroke="#151a20" stroke-width="3" stroke-linejoin="round"/>`;
+}
+function city(x, y, s, fill) {
+  const k = s;
+  return `<path d="M${x - k * 1.2} ${y + k * .8} V${y - k * .3} L${x - k * .55} ${y - k * .95} L${x + k * .1} ${y - k * .3} V${y - k * .1} H${x + k * 1.2} V${y + k * .8} Z" fill="${fill}" stroke="#151a20" stroke-width="3" stroke-linejoin="round"/>`;
+}
+
+// ---------------------------------------------------------------- board
+function renderBoard() {
+  const T = S.topology, out = [];
+  const darkUI = matchMedia("(prefers-color-scheme: dark)").matches;
+  // sea
+  const seaR = 5.15 * U;
+  const seaPts = [0, 1, 2, 3, 4, 5].map((i) => { const a = Math.PI / 3 * i; return [seaR * Math.cos(a), seaR * Math.sin(a) * 0.96]; });
+  out.push(`<polygon points="${pts(seaPts)}" fill="var(--sea)" stroke="var(--sea-deep)" stroke-width="14" stroke-linejoin="round"/>`);
+  // ports
+  for (const p of S.ports) {
+    const [a, b] = p.nodes, A1 = nxy(a), B1 = nxy(b), m = exy(p.edge);
+    const len = Math.hypot(m[0], m[1]); const px = m[0] + (0.78 * U * m[0]) / len, py = m[1] + (0.78 * U * m[1]) / len;
+    out.push(`<line x1="${A1[0]}" y1="${A1[1]}" x2="${px}" y2="${py}" stroke="#c9a978" stroke-width="7" stroke-linecap="round"/>`,
+             `<line x1="${B1[0]}" y1="${B1[1]}" x2="${px}" y2="${py}" stroke="#c9a978" stroke-width="7" stroke-linecap="round"/>`,
+             `<circle cx="${px}" cy="${py}" r="${0.3 * U}" fill="${RES_COLOR[p.type]}" stroke="#151a20" stroke-width="3"/>`,
+             `<text x="${px}" y="${py + 2}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-weight="700" font-size="17" fill="#12202a">${p.type === "3:1" ? "3:1" : "2:1"}</text>`,
+             p.type === "3:1" ? "" : `<text x="${px}" y="${py + 19}" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="11" fill="#12202a">${p.type}</text>`);
+  }
+  // tiles
+  for (const t of S.tiles) {
+    const poly = T.hex_nodes[t.id].map(nxy);
+    const inner = poly.map(([x, y]) => { const [cx, cy] = hxy(t.id); return [cx + (x - cx) * 0.9, cy + (y - cy) * 0.9]; });
+    out.push(`<polygon points="${pts(poly)}" fill="${TERRAIN_DARK[t.terrain]}" stroke="#f3ead6" stroke-width="5" stroke-linejoin="round"/>`,
+             `<polygon points="${pts(inner)}" fill="${TERRAIN[t.terrain]}"/>`);
+    out.push(terrainGlyph(t, hxy(t.id)));
+  }
+  // heatmap of open spots (for the analysed player)
+  if (opt.heat && A && !stale && A.heatmap.length) {
+    const vals = A.heatmap.map((h) => h.value), hi = Math.max(...vals), lo = Math.min(...vals);
+    for (const h of A.heatmap.slice(0, 14)) {
+      const [x, y] = nxy(h.node), k = (h.value - lo) / ((hi - lo) || 1);
+      out.push(`<circle cx="${x}" cy="${y}" r="${9 + k * 9}" fill="var(--accent)" fill-opacity="${0.18 + k * 0.55}" stroke="var(--accent)" stroke-opacity=".9" stroke-width="2"><title>node ${h.node}: ${h.value} (${h.pips} pips)</title></circle>`);
+    }
+  }
+  // tokens
+  for (const t of S.tiles) {
+    if (!t.number) continue;
+    const [x, y] = hxy(t.id), red = t.number === 6 || t.number === 8;
+    out.push(`<circle cx="${x}" cy="${y}" r="${0.31 * U}" fill="#f6ead0" stroke="#7a6a4a" stroke-width="2"/>`,
+             `<text x="${x}" y="${y + 7}" text-anchor="middle" font-family="Bricolage Grotesque, sans-serif" font-weight="800" font-size="${red ? 30 : 27}" fill="${red ? "#c8443c" : "#22252b"}">${t.number}</text>`);
+    const n = PIPS[t.number];
+    for (let i = 0; i < n; i++) out.push(`<circle cx="${x + (i - (n - 1) / 2) * 7}" cy="${y + 19}" r="2.6" fill="${red ? "#c8443c" : "#22252b"}"/>`);
+  }
+  // analysis overlay: road plan toward best spot
+  const ov = [];
+  if (A && !stale && A.plans.length) {
+    const plan = A.plans[0];
+    for (const e of plan.edges) {
+      const [a, b] = S.topology.edges[e].nodes, p = nxy(a), q = nxy(b);
+      ov.push(`<line x1="${p[0]}" y1="${p[1]}" x2="${q[0]}" y2="${q[1]}" stroke="${PLAYER[A.player]}" stroke-width="9" stroke-dasharray="3 14" stroke-linecap="round" opacity=".95"/>`);
+    }
+    const [tx, ty] = nxy(plan.target);
+    ov.push(`<g opacity=".55">${house(tx, ty, 15, PLAYER[A.player])}</g>`);
+  }
+  // roads
+  for (const p of S.players) for (const e of p.roads) {
+    const [a, b] = S.topology.edges[e].nodes, P = nxy(a), Q = nxy(b);
+    const t0 = 0.17, t1 = 0.83, x1 = P[0] + (Q[0] - P[0]) * t0, y1 = P[1] + (Q[1] - P[1]) * t0, x2 = P[0] + (Q[0] - P[0]) * t1, y2 = P[1] + (Q[1] - P[1]) * t1;
+    out.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#151a20" stroke-width="15" stroke-linecap="round"/>`,
+             `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${PLAYER[p.color]}" stroke-width="9" stroke-linecap="round"/>`);
+  }
+  out.push(...ov);
+  // buildings
+  for (const p of S.players) {
+    for (const n of p.settlements) { const [x, y] = nxy(n); out.push(house(x, y, 17, PLAYER[p.color])); }
+    for (const n of p.cities) { const [x, y] = nxy(n); out.push(city(x, y, 18, PLAYER[p.color])); }
+  }
+  // robber
+  { const [x, y] = hxy(S.robber), yy = S.tiles[S.robber].number ? y - 0.52 * U : y - 0.1 * U;
+    out.push(`<g><ellipse cx="${x}" cy="${yy + 18}" rx="15" ry="5" fill="rgba(0,0,0,.35)"/><path d="M${x - 12} ${yy + 17} Q${x - 13} ${yy - 2} ${x - 6} ${yy - 8} A9 9 0 1 1 ${x + 6} ${yy - 8} Q${x + 13} ${yy - 2} ${x + 12} ${yy + 17} Z" fill="#2b2f36" stroke="#0e1014" stroke-width="2"/></g>`); }
+  // engine rank badges for the top moves
+  if (A && !stale) A.moves.slice(0, 3).forEach((m, i) => {
+    const tgt = moveTarget(m); if (!tgt) return;
+    const [x, y] = tgt.xy, r = 15;
+    if (tgt.kind === "edge") {
+      const [a, b] = S.topology.edges[tgt.id].nodes, P = nxy(a), Q = nxy(b);
+      out.push(`<line class="${i === 0 ? "best-pulse" : ""}" x1="${P[0]}" y1="${P[1]}" x2="${Q[0]}" y2="${Q[1]}" stroke="${RANK[i]}" stroke-width="10" stroke-linecap="round" opacity=".85"/>`);
+    } else if (tgt.kind === "hex") {
+      const poly = T.hex_nodes[tgt.id].map(nxy);
+      out.push(`<polygon class="${i === 0 ? "best-pulse" : ""}" points="${pts(poly)}" fill="none" stroke="${RANK[i]}" stroke-width="8" stroke-linejoin="round"/>`);
+    } else {
+      out.push(`<circle class="${i === 0 ? "best-pulse" : ""}" cx="${x}" cy="${y}" r="27" fill="none" stroke="${RANK[i]}" stroke-width="7"/>`);
+    }
+    const bx = x + (tgt.kind === "hex" ? 0 : 24), by = y + (tgt.kind === "hex" ? 0.55 * U : -24);
+    out.push(`<circle cx="${bx}" cy="${by}" r="${r}" fill="${RANK[i]}" stroke="#10202a" stroke-width="2"/><text x="${bx}" y="${by + 5}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-weight="700" font-size="15" fill="#10202a">${i + 1}</text>`);
+  });
+  // hit targets
+  for (const t of S.tiles) out.push(`<polygon class="hit-hex" data-hex="${t.id}" points="${pts(T.hex_nodes[t.id].map(nxy))}"><title>hex ${t.id} · ${t.terrain}${t.number ? " " + t.number : ""}</title></polygon>`);
+  for (const e of T.edges) { const [a, b] = e.nodes, P = nxy(a), Q = nxy(b);
+    out.push(`<line class="hit-edge" data-edge="${e.id}" x1="${P[0]}" y1="${P[1]}" x2="${Q[0]}" y2="${Q[1]}"><title>edge ${e.id} (${a}-${b})</title></line>`); }
+  for (const n of T.nodes) { const [x, y] = nxy(n.id);
+    out.push(`<circle class="hit-node" data-node="${n.id}" cx="${x}" cy="${y}" r="15"><title>node ${n.id}</title></circle>`); }
+  if (opt.ids) {
+    out.push(`<g class="ids">`);
+    for (const t of S.tiles) { const [x, y] = hxy(t.id); out.push(`<text x="${x}" y="${y - 0.58 * U}" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="3" paint-order="stroke">H${t.id}</text>`); }
+    for (const n of T.nodes) { const [x, y] = nxy(n.id); out.push(`<text x="${x + 9}" y="${y - 8}" fill="#fff" stroke="#000" stroke-width="3" paint-order="stroke">${n.id}</text>`); }
+    for (const e of T.edges) { const [x, y] = exy(e.id); out.push(`<text x="${x}" y="${y + 3}" text-anchor="middle" fill="#ffe08a" stroke="#000" stroke-width="3" paint-order="stroke" font-size="9">${e.id}</text>`); }
+    out.push(`</g>`);
+  }
+  $("board").innerHTML = out.join("");
+}
+
+function terrainGlyph(t, [cx, cy]) {
+  // small, quiet motif per terrain so tiles read without colour alone
+  const y = cy + 0.52 * U, c = "rgba(255,255,255,.55)";
+  switch (t.terrain) {
+    case "forest": return `<path d="M${cx - 16} ${y + 8} L${cx - 9} ${y - 8} L${cx - 2} ${y + 8} Z M${cx + 2} ${y + 8} L${cx + 9} ${y - 10} L${cx + 16} ${y + 8} Z" fill="${c}"/>`;
+    case "hills": return `<path d="M${cx - 16} ${y + 6} h12 v-7 h-12 Z M${cx - 4} ${y + 6} h12 v-7 h-12 Z M${cx - 10} ${y - 1} h12 v-7 h-12 Z" fill="${c}"/>`;
+    case "pasture": return `<ellipse cx="${cx}" cy="${y}" rx="12" ry="8" fill="${c}"/><circle cx="${cx + 13}" cy="${y - 3}" r="4" fill="${c}"/>`;
+    case "fields": return `<path d="M${cx - 8} ${y + 9} V${y - 9} M${cx} ${y + 9} V${y - 11} M${cx + 8} ${y + 9} V${y - 9}" stroke="${c}" stroke-width="3.5" stroke-linecap="round"/>`;
+    case "mountains": return `<path d="M${cx - 18} ${y + 8} L${cx - 5} ${y - 10} L${cx + 3} ${y} L${cx + 9} ${y - 6} L${cx + 18} ${y + 8} Z" fill="${c}"/>`;
+    default: return `<text x="${cx}" y="${cy + 0.55 * U}" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="15" font-weight="600" fill="rgba(80,60,20,.55)">desert</text>`;
+  }
+}
+
+function moveTarget(m) {
+  for (const ev of m.events || []) {
+    if (ev.type === "build" && ev.item === "road") return { kind: "edge", id: Number(ev.target), xy: exy(Number(ev.target)) };
+    if (ev.type === "build" && (ev.item === "settlement" || ev.item === "city")) return { kind: "node", id: Number(ev.target), xy: nxy(Number(ev.target)) };
+    if (ev.type === "robber") return { kind: "hex", id: ev.hex, xy: hxy(ev.hex) };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- board clicks
+function onBoardClick(e) {
+  const t = e.target;
+  const who = actor || S.current, free = opt.free ? " free" : "";
+  if (t.dataset.node !== undefined) {
+    const n = Number(t.dataset.node), own = nodeOwner(n);
+    if (own && own[0] === who && own[1] === "s") return send(`b ${who} c ${n}`);
+    if (own) return toast(`node ${n} is taken by ${own[0]}`);
+    return send(`b ${who} s ${n}${free}`);
+  }
+  if (t.dataset.edge !== undefined) return send(`b ${who} r ${t.dataset.edge}${free}`);
+  if (t.dataset.hex !== undefined) return robberPopover(Number(t.dataset.hex), e);
+}
+
+function robberPopover(h, evt) {
+  if (h === S.robber) return toast("The robber is already on that tile");
+  const victims = new Set();
+  for (const n of S.topology.hex_nodes[h]) { const o = nodeOwner(n); if (o && o[0] !== S.current) victims.add(o[0]); }
+  const wrap = $("boardwrap").getBoundingClientRect();
+  const x = Math.min(evt.clientX - wrap.left + 8, wrap.width - 190), y = evt.clientY - wrap.top + 8;
+  const cards = (c) => S.players.find((p) => p.color === c).cards;
+  const items = [...victims].map((c) => `<button data-steal="${c}"><span class="dot" style="background:${PLAYER[c]}"></span>steal from ${c} <span class="sub">(${cards(c)} cards)</span></button>`);
+  items.push(`<button data-steal="">move without stealing</button>`);
+  $("popover-host").innerHTML = `<div class="popover" style="left:${x}px;top:${y}px"><h4>Robber → hex ${h}</h4>${items.join("")}</div>`;
+  $("popover-host").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => send(`r ${h} ${b.dataset.steal}`.trim())));
+}
+function closePopover() { $("popover-host").innerHTML = ""; }
+
+// ---------------------------------------------------------------- panels
+function renderStatus() {
+  const cur = S.current;
+  const phase = { main: S.last_roll ? "build / trade" : "to roll", discard: "discard", robber: "move robber" }[S.phase] || S.phase;
+  $("status").innerHTML = `
+    <span class="chip">Turn <b>${S.turn}</b></span>
+    <span class="chip"><span class="dot" style="background:${PLAYER[cur]}"></span><b style="text-transform:capitalize">${cur}</b>&nbsp;${esc(phase)}</span>
+    ${S.phase !== "main" ? `<span class="chip phase-${S.phase}">${S.phase === "discard" ? "7 rolled — discards pending" : "7 / knight — robber"}</span>` : ""}
+    <span class="chip">Last roll <b>${S.last_roll ?? "—"}</b></span>`;
+  const banner = S.phase === "discard"
+    ? `Discards pending: ${Object.entries(S.pending_discards).map(([c, n]) => `${c} ${n}`).join(", ")}. Use the engine's suggestion or type <code>x &lt;player&gt; &lt;cards&gt;</code>.`
+    : S.phase === "robber" ? `Move the robber: click a tile, then pick who to steal from.` : "";
+  $("banner").innerHTML = banner ? `<div class="banner">${banner}</div>` : "";
+  $("btn-undo").disabled = !S.can_undo;
+  const me = $("opt-me");
+  me.innerHTML = `<option value="">Me: not set</option>` + S.order.map((c) => `<option value="${c}" ${S.perspective === c ? "selected" : ""}>Me: ${c}</option>`).join("");
+}
+
+function renderDice() {
+  $("dice").innerHTML = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) =>
+    `<button data-roll="${n}" class="${n === 7 ? "seven" : n === 6 || n === 8 ? "hot" : ""}" title="roll ${n}">${n}</button>`).join("");
+}
+
+function renderPlayers() {
+  const rows = S.players.map((p) => {
+    const hand = S.resources.map((r, i) => {
+      const v = p.hand[i], txt = p.exact ? String(Math.round(v)) : v.toFixed(1);
+      return `<span class="res ${v < 0.05 ? "zero" : ""}" style="background:${RES_COLOR[r]}" title="${r}">${txt}</span>`;
+    }).join("");
+    const tags = [p.longest_road ? `<span class="tag on">LR</span>` : "", p.largest_army ? `<span class="tag on">LA</span>` : "",
+      ...p.ports.map((t) => `<span class="tag">${t === "3:1" ? "3:1" : "2:1 " + RES_SHORT[t]}</span>`)].join(" ");
+    const score = A && !stale ? A.scores[p.color] : null;
+    return `<tr class="${p.color === S.current ? "turn" : ""} ${p.color === actor ? "actor" : ""}" data-actor="${p.color}" title="click to make ${p.color} the acting player">
+      <td><div class="pname"><span class="dot" style="background:${PLAYER[p.color]}"></span>${p.color}${S.perspective === p.color ? ' <span class="tag">me</span>' : ""}</div>
+          <div class="sub">${p.settlements.length}S ${p.cities.length}C ${p.roads.length}R · road ${p.road_length} · K${p.knights} · dev ${p.dev}</div></td>
+      <td class="vp">${p.vp}${p.hidden_vp >= 0.1 ? `<span class="sub">+${p.hidden_vp}</span>` : ""}</td>
+      <td><div class="hand">${hand}</div><div class="sub">${p.cards} cards${p.exact ? "" : " · estimated"}${score != null ? ` · eval ${score}` : ""}</div><div>${tags}</div></td>
+    </tr>`;
+  }).join("");
+  $("players").innerHTML = `<tr><th>Player</th><th>VP</th><th>Hand</th></tr>${rows}`;
+  $("bank").textContent = `bank ${S.resources.map((r, i) => RES_SHORT[r] + S.bank[i]).join(" ")} · dev ${S.dev_deck}`;
+}
+
+function renderFeed() {
+  $("feed").innerHTML = S.feed.slice().reverse().map((f) =>
+    `<li class="${f.ok ? "" : "err"}"><span class="n">T${f.turn}</span><div><code>${esc(f.line)}</code><div class="m">${esc(f.message)}</div></div></li>`).join("")
+    || `<li><span class="n"></span><div class="m">Roll the dice with the buttons under the board, or type a command.</div></li>`;
+}
+
+function renderEngine() {
+  const bd = $("engine-bd");
+  $("engine-meta").innerHTML = analyzing ? `<span class="analyzing"><span class="spinner"></span>analyzing…</span>`
+    : A ? `${A.rollouts ? `${A.rollouts} rollouts · ±${(100 / Math.sqrt(A.rollouts)).toFixed(0)}%` : "heuristic"} · ${A.seconds}s` : "";
+  if (!A) { bd.innerHTML = `<div class="sub">${opt.live ? "Starting engine…" : `<button class="btn primary" id="btn-analyze">Analyze position</button>`}</div>`; bindAnalyze(); return; }
+  const best = A.moves[0];
+  const lines = A.moves.map((m, i) => `
+    <li>
+      <span class="rank" style="background:${RANK[i] || RANK[4]}">${i + 1}</span>
+      <span class="win">${m.win != null ? pct(m.win) : (m.heuristic >= 0 ? "+" : "") + m.heuristic.toFixed(2)}</span>
+      <div class="mv"><div class="t">${esc(m.label)}</div>${m.detail ? `<div class="d">${esc(m.detail)}</div>` : ""}</div>
+      <button class="play" data-play="${i}" title="apply this move">▶ play</button>
+    </li>`).join("");
+  bd.innerHTML = `
+    <div style="${stale ? "opacity:.5" : ""}">
+      <div class="verdict">
+        <div class="big" style="color:${PLAYER[A.player] === "#f4f4f0" ? "var(--fg)" : PLAYER[A.player]}">${pct(A.win)}</div>
+        <div class="who">win chance for <b style="text-transform:capitalize">${A.player}</b><br>position score ${A.position_score} · ${A.phase} phase</div>
+        ${best ? `<div class="best">Best: ${esc(best.label)}</div>` : ""}
+      </div>
+      <ol class="lines">${lines}</ol>
+      ${A.plans.length ? `<div class="notes">Road plan: ${A.plans.map((p) => `node ${p.target} in ${p.cost} (${p.contested})`).join(" · ")}</div>` : ""}
+      <div class="notes">Card values now: ${Object.entries(A.resource_values).map(([r, v]) => `${r} ${v}`).join(" · ")}</div>
+      ${A.notes.map((n) => `<div class="notes">${esc(n)}</div>`).join("")}
+      ${opt.live ? "" : `<div style="margin-top:10px"><button class="btn" id="btn-analyze">Re-analyze</button></div>`}
+    </div>`;
+  bd.querySelectorAll("[data-play]").forEach((b) => b.addEventListener("click", () => {
+    const m = A.moves[Number(b.dataset.play)];
+    applyEvents(m.events, m.label);
+  }));
+  bindAnalyze();
+}
+function bindAnalyze() { const b = $("btn-analyze"); if (b) b.addEventListener("click", analyze); }
+
+function renderEval() {
+  const bar = $("evalbar");
+  if (!A || !S) { bar.innerHTML = ""; return; }
+  const me = S.perspective || A.player;
+  const order = [me, ...S.order.filter((c) => c !== me)];
+  bar.innerHTML = order.map((c) => `<div class="seg" style="flex:0 0 ${(A.table[c] || 0) * 100}%;background:${PLAYER[c]}" title="${c} ${pct(A.table[c])}"></div>`).join("")
+    + `<div class="lbl">${Math.round((A.table[me] || 0) * 100)}</div>`;
+  bar.style.opacity = stale ? .55 : 1;
+}
+
+function renderAll() {
+  if (!S) return;
+  renderStatus(); renderBoard(); renderPlayers(); renderFeed(); renderEngine(); renderEval();
+}
+
+// ---------------------------------------------------------------- wiring
+$("board").addEventListener("click", onBoardClick);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== $("cmd")) { e.preventDefault(); $("cmd").focus(); }
+  if (e.key === "Escape") closePopover();
+});
+document.addEventListener("click", (e) => { if (!e.target.closest(".popover") && !e.target.closest("#board")) closePopover(); });
+$("dice").addEventListener("click", (e) => { const n = e.target.dataset.roll; if (n) send(`d ${n}`); });
+$("btn-next").addEventListener("click", () => send("n"));
+$("btn-undo").addEventListener("click", async () => { const r = await api("/api/undo", {}); toast(r.message); setState(r.state); });
+$("cmdform").addEventListener("submit", (e) => { e.preventDefault(); const v = $("cmd").value.trim(); if (v) { send(v); $("cmd").value = ""; } });
+$("players").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-actor]"); if (!tr) return;
+  actor = tr.dataset.actor; actorPinned = actor !== S.current; stale = true; renderAll(); if (opt.live) analyze();
+});
+$("opt-live").addEventListener("change", (e) => { opt.live = e.target.checked; if (opt.live) analyze(); else renderEngine(); });
+$("opt-depth").addEventListener("change", (e) => { opt.depth = Number(e.target.value); if (opt.live) analyze(); });
+$("opt-heat").addEventListener("change", (e) => { opt.heat = e.target.checked; renderBoard(); });
+$("opt-ids").addEventListener("change", (e) => { opt.ids = e.target.checked; renderBoard(); });
+$("opt-free").addEventListener("change", (e) => { opt.free = e.target.checked; });
+$("opt-me").addEventListener("change", (e) => { if (e.target.value) send(`me ${e.target.value}`); });
+$("btn-new").addEventListener("click", async () => { const r = await api("/api/new", {}); setState(r.state); toast("Example board loaded"); });
+$("btn-save").addEventListener("click", async () => {
+  const data = await api("/api/save");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  a.download = `catan-turn${S.turn}.json`; a.click();
+});
+$("btn-load").addEventListener("click", () => $("file-json").click());
+$("btn-shot").addEventListener("click", () => $("file-img").click());
+$("file-json").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try { const r = await api("/api/load", JSON.parse(await f.text())); if (!r.ok) return toast(r.error); setState(r.state); toast("Board loaded"); }
+  catch (err) { toast("That file is not valid board JSON: " + err.message); }
+  e.target.value = "";
+});
+async function readShot(file) {
+  toast("Reading screenshot…", 10000);
+  const r = await api("/api/extract", await file.arrayBuffer(), true);
+  if (!r.ok) return toast(r.error.includes("cv2") ? "Screenshot reading needs opencv: pip install -r requirements.txt" : r.error, 6000);
+  setState(r.state);
+  toast(r.warnings.length ? `Board read with ${r.warnings.length} warning(s) — check tiles: ${r.warnings[0]}` : "Board read from screenshot", 7000);
+}
+$("file-img").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) readShot(f); e.target.value = ""; });
+const bw = $("boardwrap");
+bw.addEventListener("dragover", (e) => { e.preventDefault(); bw.classList.add("drop"); });
+bw.addEventListener("dragleave", () => bw.classList.remove("drop"));
+bw.addEventListener("drop", (e) => {
+  e.preventDefault(); bw.classList.remove("drop");
+  const f = e.dataTransfer.files[0]; if (!f) return;
+  if (f.type.startsWith("image/")) readShot(f);
+  else f.text().then((t) => api("/api/load", JSON.parse(t))).then((r) => r.ok ? setState(r.state) : toast(r.error));
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
+
+renderDice();
+api("/api/state").then(setState).catch(() => toast("Cannot reach the engine server. Start it with: python -m catan.gui_server", 10000));
+</script>
+</body>
+</html>

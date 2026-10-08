@@ -112,7 +112,7 @@ class Recommendation:
         if self.all_win_probs:
             lines.append("Table win %: " + ", ".join(f"{c} {p * 100:.1f}%" for c, p in self.all_win_probs.items()))
         if any(m.win_prob is not None for m in self.moves):
-            lines.append("ranking: Monte Carlo win %; heuristic breaks ties within one standard error")
+            lines.append("ranking: Monte Carlo win %; heuristic breaks ties within half a standard error")
         lines.extend(f"note: {n}" for n in self.notes)
         return "\n".join(lines)
 
@@ -540,7 +540,9 @@ class CatanEngine:
         elif g.phase == "discard":
             moves = []
             for c, n in g.pending_discards.items():
-                moves.append(Move(f"{c} discard {fmt_hand(self.suggest_discard(c, n))}", [],
+                cards = self.suggest_discard(c, n)
+                moves.append(Move(f"{c} discard {fmt_hand(cards)}",
+                                  [{"type": "discard", "player": c, "cards": tuple(cards)}],
                                   detail=f"keeps best progress toward {self._saving_hint(c, self._acting_hand(c))}"))
             notes.append("discard suggestions only; robber advice follows after discards")
             ps = self.position_score(color)
@@ -576,9 +578,9 @@ class CatanEngine:
                 # the dice for this turn are already rolled: rollouts start with the next player
                 table[id(m)] = self.simulate(after, color, start_next_turn=True)
                 m.win_prob = table[id(m)][color]
-            # Rank by MC win rate; the heuristic may shift a move by at most one
-            # standard error, i.e. it only decides between statistically tied moves.
-            se = math.sqrt(0.25 / self.rollouts)
+            # Rank by MC win rate; the heuristic may shift a move by at most half a
+            # standard error, so it only decides between statistically tied moves.
+            se = 0.5 * math.sqrt(0.25 / self.rollouts)
             hs = [m.heuristic for m in shortlist]
             lo, span = min(hs), (max(hs) - min(hs)) or 1.0
             for m in shortlist:
