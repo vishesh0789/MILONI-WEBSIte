@@ -256,8 +256,14 @@ def test_robber_avoids_own_hexes(game: GameState) -> None:
         assert opt.hex != game.board.robber_hex
 
 
+def test_pre_roll_advice_is_to_roll(game: GameState) -> None:
+    rec = CatanEngine(game, rollouts=6).recommend()
+    assert rec.best.label == "Roll the dice" and rec.best.win_prob is not None
+
+
 def test_recommend_top3_with_city(game: GameState) -> None:
     game.execute("g red 2g 2o")  # red: 1 brick, 3 ore, 2 wheat -> city affordable
+    game.execute("d 12")         # nobody sits on the 12
     rec = CatanEngine(game, rollouts=12, mc_top_k=3).recommend(top_k=3)
     assert len(rec.moves) == 3
     assert "City" in rec.best.label
@@ -343,7 +349,7 @@ def test_gui_server_api(data: dict) -> None:
 
     from catan.gui_server import Session, make_handler
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Session(GameState.from_dict(data))))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Session(GameState.from_dict(data), autosave_path=None)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -364,5 +370,149 @@ def test_gui_server_api(data: dict) -> None:
         res = post("/api/apply", {"events": moves[0]["events"], "label": moves[0]["label"]})
         assert res["ok"]
         assert post("/api/undo", {})["state"]["can_undo"] in (True, False)
+    finally:
+        server.shutdown()
+
+
+# -- setup, corrections, persistence ---------------------------------------------
+
+
+@pytest.fixture
+def blank(data: dict) -> GameState:
+    d = json.loads(json.dumps(data))
+    d["players"] = []
+    return GameState.from_dict(d)
+
+
+def test_setup_snake_draft(blank: GameState) -> None:
+    g = blank
+    assert g.phase == "setup" and g.setup_next() == ("red", "settlement")
+    with pytest.raises(CommandError):
+        g.execute("8")  # no dice during setup
+    eng = CatanEngine(g, rollouts=0)
+    for _ in range(16):
+        rec = eng.recommend()
+        assert rec.phase == "setup" and rec.moves
+        g.apply_events(rec.best.events)
+    assert g.phase == "main" and g.current_color == "red" and g.last_roll is None
+    assert all(len(p.settlements) == 2 and len(p.roads) == 2 for p in g.players.values())
+    # second settlements paid their starting cards (snake: white placed 5th, so white's 2nd is 5th too)
+    assert all(g.hand_total(c) > 0 for c in g.order)
+    assert_conservation(g)
+
+
+def test_setup_road_must_touch_new_settlement(blank: GameState) -> None:
+    blank.execute("b red s 20")
+    with pytest.raises(CommandError):
+        blank.execute("b red r 0")
+    blank.execute("b red r 20-26")
+    assert blank.setup_next() == ("blue", "settlement")
+
+
+def test_board_edit_commands(game: GameState) -> None:
+    game.execute("tile 4 mountains 11")
+    assert game.board.tiles[4].terrain.value == "mountains" and game.board.tiles[4].number == 11
+    assert game.board_warnings()  # composition no longer standard -> a warning, not an error
+    game.execute("tile 4 hills 6")
+    game.execute("tile 9 robber")
+    with pytest.raises(CommandError):
+        game.execute("tile 4 7")
+    edge = game.board.topology.coastal_edges[1]
+    game.execute(f"port {edge} ore")
+    assert any(p.type == "ore" for p in game.board.ports)
+    game.execute("piece 0 blue city")
+    assert 0 in game.players["blue"].cities and game.public_vp("blue") == 4
+    game.execute("piece 0 none")
+    game.execute("piece 26-32 white")
+    assert game.board.topology.edge_between(26, 32) in game.players["white"].roads
+    game.execute("u")
+    assert game.board.topology.edge_between(26, 32) not in game.players["white"].roads
+
+
+def test_set_hand_and_devs(game: GameState) -> None:
+    game.execute("hand blue 2w 1o")
+    assert game.expected_hand("blue") == [2, 0, 0, 0, 1]
+    assert_conservation(game)
+    game.execute("hand orange 5")
+    assert game.hand_total("orange") == 5 and not game.belief.is_exact(game.idx("orange"))
+    deck = game.dev_deck
+    game.execute("devs white 2 3")
+    assert game.players["white"].dev_hidden == 2 and game.dev_deck == deck - 5
+    assert game.largest_army_owner == "white"
+
+
+def test_save_load_keeps_phase_devs_and_uncertainty(game: GameState) -> None:
+    game.execute("8")
+    game.execute("devs orange 1 0")
+    game.execute("n")
+    game.execute("7")
+    with pytest.raises(CommandError):
+        game.execute("r 16 blue")  # blue is moving the robber: cannot rob itself
+    game.execute("r 15 red")       # unknown steal -> uncertain hands
+    g2 = GameState.from_dict(json.loads(json.dumps(game.to_dict())))
+    assert g2.dev_deck == game.dev_deck and g2.phase == game.phase == "main"
+    assert not g2.belief.is_exact(g2.idx("red"))
+    assert g2.expected_hand("red") == pytest.approx(game.expected_hand("red"))
+    assert g2.bank == game.bank
+
+
+def test_random_board_is_legal() -> None:
+    from catan.board import random_board_dict
+
+    for seed in range(5):
+        d = random_board_dict(seed)
+        board = Board.from_dict(d)
+        assert board.validate() == []  # standard composition and no adjacent 6/8
+        assert GameState.from_dict(d).phase == "setup"
+
+
+def test_offer_is_scored_as_maybe_accepted(game: GameState) -> None:
+    game.execute("d 12")
+    rec = CatanEngine(game, rollouts=8, mc_top_k=6).recommend(top_k=8)
+    for m in rec.moves:
+        if m.kind == "offer" and m.win_prob is not None:
+            assert "if accepted" in m.detail
+
+
+def test_analysis_can_be_cancelled(game: GameState) -> None:
+    from catan.catan_engine import AnalysisCancelled
+
+    game.execute("d 12")
+    with pytest.raises(AnalysisCancelled):
+        CatanEngine(game, rollouts=50, should_stop=lambda: True).recommend()
+
+
+def test_gui_new_game_and_autosave(data: dict, tmp_path: Path) -> None:
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from catan.gui_server import Session, make_handler
+
+    save = tmp_path / "autosave.json"
+    session = Session(GameState.from_dict(data), autosave_path=save)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(session))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(path: str, body: dict) -> dict:
+        req = urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    try:
+        res = post("/api/new", {"kind": "random"})
+        assert res["ok"] and res["state"]["phase"] == "setup" and res["state"]["setup_next"] == ["red", "settlement"]
+        res = post("/api/analyze", {"rollouts": 20})
+        assert res["analysis"]["phase"] == "setup" and res["analysis"]["moves"][0]["kind"] == "setup"
+        node = res["analysis"]["moves"][0]["events"][0]["target"]
+        assert post("/api/command", {"line": f"b red s {node}"})["ok"]
+        assert save.exists() and json.loads(save.read_text())["phase"] == "setup"
+        res = post("/api/new", {"kind": "example"})
+        assert res["state"]["previous"] and res["state"]["previous"]["phase"] == "setup"
+        res = post("/api/new", {"kind": "previous"})  # back to the game we just left
+        assert res["ok"] and res["state"]["phase"] == "setup"
+        assert node in res["state"]["players"][0]["settlements"]
+        res = post("/api/new", {"kind": "previous"})  # and forth again
+        assert res["state"]["phase"] == "main"
     finally:
         server.shutdown()

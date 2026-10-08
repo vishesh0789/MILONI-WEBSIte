@@ -14,7 +14,22 @@ Commands (case-insensitive, players accept colour prefixes ``r b o w``)::
     l <player> <res...>              manual correction: player returns to bank
     n                                end turn / next player
     me <player>                      set perspective (your own hand becomes exact)
-    s                                show state           u   undo           ai   recommend
+    s                                show state      u  undo      ai  recommend      help  this text
+
+    8                                a bare number is a dice roll (same as ``d 8``)
+
+Setup (snake draft) is detected automatically while players have fewer than two
+settlements/roads: ``b <player> s <node>`` / ``b <player> r <edge>`` are free,
+the second settlement pays its starting resources, and the turn order follows
+the snake.
+
+Corrections (joining mid-game, fixing a misread screenshot)::
+
+    hand <player> <cards> | <n>      set a hand exactly (``hand red 2w o``) or as n unknown cards
+    devs <player> <unplayed> [knights]   set dev cards held and knights already played
+    tile <hex> [terrain] [number] [robber]   ``tile 4 hills 6``, ``tile 9 desert``, ``tile 4 robber``
+    port <edge|a-b> <3:1|res|none>   set or remove the port on a coastal edge
+    piece <node|a-b|eN> <player|none> [city]   place/remove a piece without rules or costs
 
 Every command is parsed into a plain ``dict`` event (``parse_command``) and
 applied with ``GameState.apply_event`` so automated feeds (log scrapers,
@@ -38,15 +53,18 @@ import re
 import shlex
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import product
 from math import comb
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .board import (
-    PLAYER_COLORS, RES_INDEX, RESOURCES, SCHEMA_VERSION, Board, Resource, parse_resource,
+    NUMBER_COUNTS, PLAYER_COLORS, PORT_GENERIC, PORT_TYPES, RES_INDEX, RESOURCE_TERRAIN, RESOURCES,
+    SCHEMA_VERSION, Board, BoardValidationError, Port, Resource, Terrain, parse_resource,
 )
+
+COMMAND_HELP = __doc__.split("Every command is parsed")[0].strip()
 
 Hand = tuple[int, int, int, int, int]
 Joint = tuple[Hand, ...]
@@ -210,6 +228,34 @@ class HandBelief:
                 new[self._replace(s, p, hand_add(hand, combo, -1))] += w * weight / denom
         self._set(new)
 
+    def draw_unknown(self, p: int, n: int, pool: Sequence[int]) -> None:
+        """Replace player ``p``'s hand by ``n`` cards of unknown type drawn from ``pool``."""
+        total = sum(pool)
+        if n > total:
+            raise ValueError(f"only {total} cards available for an unknown hand of {n}")
+        combos = []
+        denom = comb(total, n)
+
+        def rec(i: int, left: int, acc: list[int]) -> None:
+            if i == NUM_RES - 1:
+                if left <= pool[i]:
+                    combos.append(tuple(acc + [left]))
+                return
+            for k in range(min(left, pool[i]) + 1):
+                rec(i + 1, left - k, acc + [k])
+
+        rec(0, n, [])
+        new: dict[Joint, float] = defaultdict(float)
+        # keep the branching bounded: only the most likely incoming states are expanded
+        incoming = sorted(self.states.items(), key=lambda kv: -kv[1])[: max(1, self.max_states // len(combos))]
+        for s, w in incoming:
+            for combo in combos:
+                weight = 1
+                for c, k in zip(pool, combo):
+                    weight *= comb(c, k)
+                new[self._replace(s, p, combo)] += w * weight / denom
+        self._set(new)
+
     def monopoly(self, p: int, res: int) -> None:
         new: dict[Joint, float] = defaultdict(float)
         for s, w in self.states.items():
@@ -277,7 +323,7 @@ class GameState:
     dev_deck: int = sum(DEV_DECK.values())
     current: int = 0
     turn_number: int = 1
-    phase: str = "main"                  # main | discard | robber
+    phase: str = "main"                  # setup | main | discard | robber
     pending_discards: dict[str, int] = field(default_factory=dict)
     longest_road_owner: str | None = None
     largest_army_owner: str | None = None
@@ -290,7 +336,8 @@ class GameState:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GameState":
         board = Board.from_dict(data)
-        board.validate(strict_composition=data.get("strict_composition", True))
+        # hard errors (bad numbers, ports) raise; an unusual composition is only a warning
+        board.validate(strict_composition=data.get("strict_composition", False))
         players_data = data.get("players", [])
         order = data.get("turn_order") or [p["color"] for p in players_data] or list(PLAYER_COLORS)
         game = cls(board=board, order=list(order),
@@ -308,7 +355,10 @@ class GameState:
             ps.dev_hidden = int(pd.get("dev_cards", 0))
             ps.knights_played = int(pd.get("knights_played", 0))
             ps.vp_cards = int(pd.get("vp_cards", 0))
-            game.dev_deck -= ps.dev_hidden + ps.knights_played + ps.vp_cards
+            ps.dev_played = {k: int(v) for k, v in pd.get("dev_played", {}).items()}
+            ps.dev_known = {k: int(v) for k, v in pd.get("dev_known", {}).items()}
+            other_played = sum(v for k, v in ps.dev_played.items() if k not in ("knight", "vp"))
+            game.dev_deck -= ps.dev_hidden + ps.knights_played + ps.vp_cards + other_played
         hands = data.get("hands")
         if hands:
             for color, hand in hands.items():
@@ -325,12 +375,23 @@ class GameState:
                         if res is not None:
                             vec[RES_INDEX[res]] += 1
                     game._gain(pd["color"], vec)
+        if data.get("belief"):
+            game.belief.states = {tuple(tuple(int(x) for x in h) for h in hands): float(w)
+                                  for hands, w in data["belief"]}
+        if "dev_deck" in data:
+            game.dev_deck = int(data["dev_deck"])
         if "current_player" in data:
             game.current = game.order.index(data["current_player"])
         game.turn_number = int(data.get("turn_number", 1))
         game.perspective = data.get("perspective")
+        game.phase = data.get("phase", "main")
+        game.pending_discards = {k: int(v) for k, v in data.get("pending_discards", {}).items()}
+        game.last_roll = data.get("last_roll")
+        game.largest_army_owner = data.get("largest_army_owner")
+        game.longest_road_owner = data.get("longest_road_owner")
         game._update_longest_road()
         game._update_largest_army()
+        game._refresh_setup()
         return game
 
     @classmethod
@@ -349,14 +410,54 @@ class GameState:
         out["players"] = [
             {"color": c, "settlements": sorted(p.settlements), "cities": sorted(p.cities),
              "roads": sorted(p.roads), "dev_cards": p.dev_hidden,
-             "knights_played": p.knights_played, "vp_cards": p.vp_cards}
+             "knights_played": p.knights_played, "vp_cards": p.vp_cards,
+             "dev_played": p.dev_played, "dev_known": p.dev_known}
             for c, p in self.players.items()
         ]
         best = self.belief.most_likely()
         out["hands"] = {c: {r.value: best[i][j] for j, r in enumerate(RESOURCES)}
                         for i, c in enumerate(self.order)}
+        if len(self.belief.states) > 1:
+            out["belief"] = [[[list(h) for h in s], w] for s, w in self.belief.states.items()]
         out["starting_resources"] = "none"
+        out.update({"phase": self.phase, "pending_discards": self.pending_discards,
+                    "last_roll": self.last_roll, "dev_deck": self.dev_deck,
+                    "longest_road_owner": self.longest_road_owner,
+                    "largest_army_owner": self.largest_army_owner})
         return out
+
+    # -- setup (snake draft) ---------------------------------------------------
+    def setup_next(self) -> tuple[str, str] | None:
+        """Next setup placement as (player, "settlement"|"road"), or None once setup is over."""
+        counts = {c: (len(p.buildings()), len(p.roads)) for c, p in self.players.items()}
+        if any(b > 2 or r > 2 for b, r in counts.values()) or all(c == (2, 2) for c in counts.values()):
+            return None
+        snake = self.order + self.order[::-1]
+        for i, c in enumerate(snake):
+            need = 1 if i < len(self.order) else 2
+            b, r = counts[c]
+            if b < need:
+                return c, "settlement"
+            if r < need:
+                return c, "road"
+        return None
+
+    def _refresh_setup(self) -> str:
+        nxt = self.setup_next()
+        if nxt:
+            self.phase = "setup"
+            self.current = self.idx(nxt[0])
+            return ""
+        if self.phase == "setup":
+            self.phase, self.current, self.turn_number, self.last_roll = "main", 0, 1, None
+            return f" - setup complete, {self.current_color} to roll"
+        return ""
+
+    def board_warnings(self) -> list[str]:
+        try:
+            return self.board.validate(strict_composition=False)
+        except BoardValidationError as exc:
+            return exc.errors
 
     # -- small helpers -------------------------------------------------------
     @property
@@ -567,8 +668,8 @@ class GameState:
         event = parse_command(line, self)
         if event["type"] == "undo":
             return "undone" if self.undo() else "nothing to undo"
-        if event["type"] in ("show", "noop"):
-            return self.summary() if event["type"] == "show" else ""
+        if event["type"] in ("show", "noop", "help"):
+            return {"show": self.summary, "noop": lambda: "", "help": lambda: COMMAND_HELP}[event["type"]]()
         msg = self.apply_events([event])
         self.log.append(f"T{self.turn_number} {line.strip()}")
         return msg
@@ -605,10 +706,17 @@ class GameState:
             raise CommandError(f"unknown event type {ev['type']}")
         return handler(ev)
 
+    def _setup_guard(self, what: str) -> None:
+        if self.phase == "setup":
+            nxt = self.setup_next()
+            raise CommandError(f"cannot {what} during setup - next: {nxt[0]} places a {nxt[1]}"
+                               if nxt else f"cannot {what} during setup")
+
     def _ev_roll(self, ev: Mapping[str, Any]) -> str:
         roll = int(ev["value"])
         if not 2 <= roll <= 12:
             raise CommandError("roll must be 2..12")
+        self._setup_guard("roll")
         self.last_roll = roll
         if roll == 7:
             self.pending_discards = {c: self.hand_total(c) // 2 for c in self.order
@@ -678,10 +786,13 @@ class GameState:
             raise CommandError("hex out of range")
         if h == self.board.robber_hex:
             raise CommandError("robber must move to a different hex")
+        self._setup_guard("move the robber")
         self.board.robber_hex = h
         thief = ev.get("thief") or self.current_color
         msg = f"robber -> {self.board.hex_label(h)}"
         victim = ev.get("victim")
+        if victim == thief:
+            raise CommandError(f"{thief} is moving the robber and cannot steal from themselves")
         if victim:
             adjacent = {self.node_owner(n)[0] for n in self.board.topology.hex_nodes[h]  # type: ignore[index]
                         if self.node_owner(n)}
@@ -699,6 +810,8 @@ class GameState:
         return msg
 
     def _ev_build(self, ev: Mapping[str, Any]) -> str:
+        if self.phase == "setup" and ev["item"] in ("settlement", "road"):
+            return self._setup_build(ev)
         color, item, free = ev["player"], ev["item"], bool(ev.get("free"))
         ps = self.players[color]
         if item == "devcard":
@@ -750,6 +863,142 @@ class GameState:
         else:
             raise CommandError(f"unknown item {item}")
         return f"{color} {item} on node {node} (VP {self.public_vp(color)})"
+
+    def _setup_build(self, ev: Mapping[str, Any]) -> str:
+        """Free setup placement; the second settlement pays its starting resources."""
+        color, item = ev["player"], ev["item"]
+        ps = self.players[color]
+        expected = self.setup_next()
+        note = ""
+        if expected and expected != (color, item):
+            note = f" (note: expected {expected[0]} to place a {expected[1]})"
+        if item == "settlement":
+            node = int(ev["target"])
+            if not 0 <= node < self.board.topology.num_nodes:
+                raise CommandError("node out of range")
+            if not self.can_place_settlement(color, node, require_road=False):
+                raise CommandError(f"node {node} is taken or too close to another settlement")
+            ps.settlements.add(node)
+            msg = f"{color} placed a settlement on node {node}"
+            if len(ps.buildings()) == 2:
+                vec = [0] * NUM_RES
+                for h in self.board.topology.node_hexes[node]:
+                    res = self.board.tiles[h].resource
+                    if res is not None:
+                        vec[RES_INDEX[res]] += 1
+                self._gain(color, vec)
+                msg += f", starting cards {fmt_hand(vec)}"
+        else:
+            edge = self._parse_edge(ev["target"])
+            topo = self.board.topology
+            bare = [n for n in ps.buildings() if not any(e in ps.roads for e in topo.node_edges[n])]
+            if not bare:
+                raise CommandError(f"{color} has no settlement waiting for a road - place the settlement first")
+            if self.edge_owner(edge) or not set(topo.edge_nodes[edge]) & set(bare):
+                raise CommandError(f"a setup road must touch {color}'s new settlement "
+                                   f"(node {', '.join(map(str, bare))})")
+            ps.roads.add(edge)
+            a, b = self.board.topology.edge_nodes[edge]
+            msg = f"{color} placed a road on edge {edge} ({a}-{b})"
+        self._update_longest_road()
+        msg += note + self._refresh_setup()
+        nxt = self.setup_next()
+        if nxt:
+            msg += f" - next: {nxt[0]} {nxt[1]}"
+        return msg
+
+    # -- corrections / board editing -------------------------------------------
+    def _ev_edit_tile(self, ev: Mapping[str, Any]) -> str:
+        b = self.board
+        h = int(ev["hex"])
+        if not 0 <= h < len(b.tiles):
+            raise CommandError("hex out of range")
+        t = b.tiles[h]
+        terrain = Terrain(ev["terrain"]) if ev.get("terrain") else t.terrain
+        number = ev["number"] if "number" in ev else t.number
+        if terrain == Terrain.DESERT:
+            number = None
+        if number is not None and int(number) not in NUMBER_COUNTS:
+            raise CommandError("a number token must be 2-6 or 8-12")
+        b.tiles[h] = replace(t, terrain=terrain, number=int(number) if number is not None else None)
+        if ev.get("robber"):
+            b.robber_hex = h
+        b.__post_init__()
+        return f"hex {h} is now {terrain.value}" + (f" {number}" if number else "") + \
+            (" (robber here)" if b.robber_hex == h else "")
+
+    def _ev_edit_port(self, ev: Mapping[str, Any]) -> str:
+        topo = self.board.topology
+        e = self._parse_edge(ev["edge"])
+        if e not in topo.coastal_edges:
+            raise CommandError(f"edge {e} is not on the coast")
+        a, b = topo.edge_nodes[e]
+        self.board.ports = [p for p in self.board.ports if a not in p.nodes and b not in p.nodes]
+        kind = ev.get("port")
+        if kind and kind != "none":
+            if kind not in PORT_TYPES:
+                raise CommandError(f"port type must be one of {', '.join(PORT_TYPES)}")
+            self.board.ports.append(Port(kind, (a, b)))
+        self.board.__post_init__()
+        return f"edge {e}: {'no port' if not kind or kind == 'none' else kind + ' port'}"
+
+    def _ev_set_piece(self, ev: Mapping[str, Any]) -> str:
+        color = ev.get("color")
+        if "node" in ev:
+            n = int(ev["node"])
+            if not 0 <= n < self.board.topology.num_nodes:
+                raise CommandError("node out of range")
+            for p in self.players.values():
+                p.settlements.discard(n)
+                p.cities.discard(n)
+            kind = ev.get("kind", "settlement")
+            if color:
+                (self.players[color].cities if kind == "city" else self.players[color].settlements).add(n)
+            msg = f"node {n}: {color + ' ' + kind if color else 'empty'}"
+        else:
+            e = self._parse_edge(ev["edge"])
+            for p in self.players.values():
+                p.roads.discard(e)
+            if color:
+                self.players[color].roads.add(e)
+            msg = f"edge {e}: {color + ' road' if color else 'empty'}"
+        self._update_longest_road()
+        if self.phase in ("setup", "main"):
+            msg += self._refresh_setup()
+        return msg
+
+    def _ev_set_hand(self, ev: Mapping[str, Any]) -> str:
+        color = ev["player"]
+        i = self.idx(color)
+        if "count" in ev:
+            n = int(ev["count"])
+            self.belief.set_hand(i, (0,) * NUM_RES)
+            best = self.belief.most_likely()
+            pool = [BANK_START - sum(h[r] for h in best) for r in range(NUM_RES)]
+            self.belief.draw_unknown(i, n, pool)
+            msg = f"{color} holds {n} unknown cards"
+        else:
+            vec = tuple(int(x) for x in ev["cards"])
+            self.belief.set_hand(i, vec)
+            msg = f"{color} hand set to {fmt_hand(vec)}"
+        best = self.belief.most_likely()
+        self.bank = [BANK_START - sum(h[r] for h in best) for r in range(NUM_RES)]
+        if min(self.bank) < 0:
+            raise CommandError("more cards than exist in the game - check the counts")
+        return msg
+
+    def _ev_set_dev(self, ev: Mapping[str, Any]) -> str:
+        p = self.players[ev["player"]]
+        dev = int(ev.get("dev", p.dev_hidden))
+        knights = int(ev.get("knights", p.knights_played))
+        delta = (dev - p.dev_hidden) + (knights - p.knights_played)
+        if delta > self.dev_deck:
+            raise CommandError("not enough cards left in the dev deck")
+        self.dev_deck -= delta
+        p.dev_hidden, p.knights_played = dev, knights
+        p.dev_played["knight"] = knights
+        self._update_largest_army()
+        return f"{ev['player']}: {dev} unplayed dev cards, {knights} knights played"
 
     def _ev_bank_trade(self, ev: Mapping[str, Any]) -> str:
         color = ev.get("player") or self.current_color
@@ -821,6 +1070,7 @@ class GameState:
         return f"{color} -{fmt_hand(vec)} (manual)"
 
     def _ev_next_turn(self, ev: Mapping[str, Any]) -> str:
+        self._setup_guard("end the turn")
         self.current = (self.current + 1) % len(self.order)
         if self.current == 0:
             self.turn_number += 1
@@ -860,6 +1110,13 @@ class GameState:
 # ---------------------------------------------------------------------------
 
 
+def _parse_terrain(tok: str) -> Terrain:
+    try:
+        return Terrain(tok)
+    except ValueError:
+        return RESOURCE_TERRAIN[parse_resource(tok)]
+
+
 def _is_trade_player(tok: str, game: GameState) -> bool:
     """In ``t`` a leading token is a player only if it cannot also be a resource (w/b/o clash)."""
     if tok in game.order:
@@ -881,6 +1138,8 @@ def parse_command(line: str, game: GameState) -> dict[str, Any]:
         if len(args) < n:
             raise CommandError(f"usage: {usage}")
 
+    if cmd.isdigit() and not args:
+        return {"type": "roll", "value": int(cmd)}
     if cmd in ("d", "roll"):
         need(1, "d <roll>")
         return {"type": "roll", "value": int(args[0])}
@@ -962,7 +1221,50 @@ def parse_command(line: str, game: GameState) -> dict[str, Any]:
         return {"type": "show"}
     if cmd in ("u", "undo"):
         return {"type": "undo"}
-    raise CommandError(f"unknown command '{cmd}' (d r x b t tp p g l n me s u ai)")
+    if cmd in ("h", "help", "?"):
+        return {"type": "help"}
+    if cmd == "hand":
+        need(2, "hand <player> <cards> | <n>")
+        player = game.resolve_player(args[0])
+        if len(args) == 2 and args[1].isdigit():
+            return {"type": "set_hand", "player": player, "count": int(args[1])}
+        return {"type": "set_hand", "player": player, "cards": parse_resource_list(args[1:])}
+    if cmd in ("devs", "dev"):
+        need(2, "devs <player> <unplayed> [knights_played]")
+        ev = {"type": "set_dev", "player": game.resolve_player(args[0]), "dev": int(args[1])}
+        if len(args) > 2:
+            ev["knights"] = int(args[2])
+        return ev
+    if cmd == "tile":
+        need(2, "tile <hex> [terrain] [number] [robber]")
+        ev = {"type": "edit_tile", "hex": int(args[0])}
+        for a in args[1:]:
+            if a.isdigit():
+                ev["number"] = int(a)
+            elif a == "robber":
+                ev["robber"] = True
+            elif a in ("none", "-"):
+                ev["number"] = None
+            else:
+                ev["terrain"] = _parse_terrain(a).value
+        return ev
+    if cmd == "port":
+        need(2, "port <edge|a-b> <3:1|resource|none>")
+        kind = args[1]
+        if kind in ("3", "3:1", "any", "generic", "?"):
+            kind = PORT_GENERIC
+        elif kind != "none":
+            kind = parse_resource(kind).value
+        return {"type": "edit_port", "edge": args[0], "port": kind}
+    if cmd == "piece":
+        need(2, "piece <node|a-b|eN> <player|none> [city]")
+        target = args[0]
+        color = None if args[1] in ("none", "-", "empty") else game.resolve_player(args[1])
+        if "-" in target or target.startswith("e"):
+            return {"type": "set_piece", "edge": target.lstrip("e"), "color": color}
+        return {"type": "set_piece", "node": int(target.lstrip("n")), "color": color,
+                "kind": "city" if "city" in args[2:] or "c" in args[2:] else "settlement"}
+    raise CommandError(f"unknown command '{cmd}' - type help for the list")
 
 
 # ---------------------------------------------------------------------------
@@ -976,10 +1278,12 @@ def repl(game: GameState, *, engine_factory: Any = None) -> None:  # pragma: no 
     except ImportError:
         pass
     print(game.summary())
-    print(__doc__.split("Every command")[0])
+    print("\nType a command: a number logs a roll, 'help' lists everything, 'ai' gives advice, 'q' quits.")
     while True:
+        nxt = game.setup_next() if game.phase == "setup" else None
+        prompt = f"[setup: {nxt[0]} {nxt[1]}]> " if nxt else f"[{game.current_color} {game.phase}]> "
         try:
-            line = input(f"[{game.current_color} {game.phase}]> ")
+            line = input(prompt)
         except (EOFError, KeyboardInterrupt):
             print()
             return

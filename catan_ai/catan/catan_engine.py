@@ -26,7 +26,7 @@ import heapq
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .board import PIPS, RES_INDEX, RESOURCES, Board, Resource
 from .state_manager import (
@@ -34,6 +34,10 @@ from .state_manager import (
 )
 
 WIN_VP = 10
+
+
+class AnalysisCancelled(Exception):
+    """Raised inside a running analysis when ``should_stop`` reports a newer request."""
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +85,8 @@ class Move:
     win_prob: float | None = None
     detail: str = ""
     rank_score: float = 0.0
+    kind: str = ""                          # "", "offer", "devcard", "roll", "setup"
+    offer: dict[str, list[int]] | None = None
 
 
 @dataclass
@@ -124,8 +130,10 @@ class Recommendation:
 
 class CatanEngine:
     def __init__(self, game: GameState, *, rollouts: int = 80, seed: int = 7,
-                 max_rounds: int = 60, mc_top_k: int = 5):
+                 max_rounds: int = 60, mc_top_k: int = 5,
+                 should_stop: Callable[[], bool] | None = None):
         self.game = game
+        self.should_stop = should_stop
         self.rollouts = rollouts
         self.seed = seed
         self.max_rounds = max_rounds
@@ -435,7 +443,8 @@ class CatanEngine:
                                       detail=f"toward node {plan.target} ({plan.cost} roads, {plan.contested})"))
             if can_afford(h, COSTS["devcard"]) and g.dev_deck > 0:
                 moves.append(Move(prefix_label + "Buy Dev Card",
-                                  prefix + [{"type": "build", "player": color, "item": "devcard"}]))
+                                  prefix + [{"type": "build", "player": color, "item": "devcard"}],
+                                  kind="devcard"))
 
         add_build_moves(hand, [], "")
         # Bank/port trades that unlock a build this turn.
@@ -483,7 +492,8 @@ class CatanEngine:
                     # modelled as a swap with the bank so the heuristic/MC can price it
                     [{"type": "adjust", "player": color, "cards": give, "sign": -1},
                      {"type": "adjust", "player": color, "cards": get, "sign": 1}],
-                    detail=f"toward {name}; partner must accept"))
+                    detail=f"toward {name}; partner must accept",
+                    kind="offer", offer={"give": list(give), "get": list(get)}))
         # Knight before/after roll if the robber sits on us.
         knights = p.dev_known.get("knight", 0) if color == g.perspective else 0
         if knights:
@@ -524,10 +534,75 @@ class CatanEngine:
         return g2
 
     # -- recommendation -------------------------------------------------------
+    def _setup_moves(self, color: str, kind: str) -> list[Move]:
+        g = self.game
+        topo = g.board.topology
+        moves: list[Move] = []
+        if kind == "settlement":
+            second = len(g.players[color].buildings()) == 1
+            for ns in self.settlement_scores(color, require_road=False, top=8):
+                start = ""
+                if second:
+                    cards = [g.board.tiles[h].resource.value for h in topo.node_hexes[ns.node]
+                             if g.board.tiles[h].resource]
+                    start = f"; starting cards {', '.join(cards) or 'none'}"
+                moves.append(Move(f"Place Settlement at Node {ns.node}",
+                                  [{"type": "build", "player": color, "item": "settlement", "target": ns.node}],
+                                  heuristic=ns.value, detail=str(ns).split(": ", 1)[1] + start, kind="setup"))
+            return moves
+        p = g.players[color]
+        bare = [n for n in p.buildings() if not any(e in p.roads for e in topo.node_edges[n])]
+        for anchor in bare:
+            for e in topo.node_edges[anchor]:
+                if g.edge_owner(e) is not None:
+                    continue
+                a, b = topo.edge_nodes[e]
+                far = b if a == anchor else a
+                spots = [w for w in topo.node_neighbors[far]
+                         if w != anchor and g.can_place_settlement(color, w, require_road=False)]
+                scored = sorted((self.node_score(w, color) for w in spots), key=lambda x: -x.value)
+                value = scored[0].value if scored else 0.0
+                detail = f"toward node {scored[0].node} ({scored[0].pips} pips)" if scored else "dead end"
+                moves.append(Move(f"Place Road on Edge {e} ({anchor}-{far})",
+                                  [{"type": "build", "player": color, "item": "road", "target": e}],
+                                  heuristic=value, detail=detail, kind="setup"))
+        return sorted(moves, key=lambda m: -m.heuristic)
+
     def recommend(self, color: str | None = None, *, top_k: int = 3) -> Recommendation:
         g = self.game
         color = color or g.current_color
         notes: list[str] = []
+        if g.phase == "setup":
+            nxt = g.setup_next()
+            if nxt:
+                color, kind = nxt
+                moves = self._setup_moves(color, kind)
+                win = self.softmax_win()
+                return Recommendation(color, "setup", moves[:top_k], self.position_score(color), win[color], win,
+                                      [f"setup: {color} places a {kind}; ranked by placement value "
+                                       "(win % starts once every piece is down)"])
+        pre_roll = g.phase == "main" and g.last_roll is None and color == g.current_color
+        if pre_roll:
+            hand = self._acting_hand(color)
+            moves = [Move("Roll the dice", [], kind="roll",
+                          detail=f"then aim for: {self._saving_hint(color, hand)}")]
+            p = g.players[color]
+            if color == g.perspective and p.dev_known.get("knight", 0):
+                moves.append(Move("Play Knight before rolling",
+                                  [{"type": "play_dev", "player": color, "card": "knight"}]
+                                  + self._robber_followup(color)))
+            notes.append("before the roll: enter the number rolled (only a knight may be played first)")
+            win_probs = self.softmax_win()
+            if self.rollouts > 0:
+                for m in moves:
+                    after = self._apply(m.events) if m.events else g
+                    res = self.simulate(after, color, start_next_turn=False)
+                    m.win_prob = res[color]
+                    if m is moves[0]:
+                        win_probs = res
+                moves.sort(key=lambda m: -(m.win_prob or 0))
+            return Recommendation(color, g.phase, moves[:top_k], self.position_score(color),
+                                  win_probs[color], win_probs, notes)
         if g.phase in ("robber",) and color == g.current_color:
             moves = []
             for o in self.robber_options(color, top=max(top_k, 4)):
@@ -578,6 +653,15 @@ class CatanEngine:
                 # the dice for this turn are already rolled: rollouts start with the next player
                 table[id(m)] = self.simulate(after, color, start_next_turn=True)
                 m.win_prob = table[id(m)][color]
+            # A table offer only happens if someone accepts: score it as a coin flip
+            # between the accepted outcome and simply passing.
+            pass_move = next((m for m in shortlist if not m.events and m.kind != "roll"), None)
+            if pass_move is not None:
+                for m in shortlist:
+                    if m.kind == "offer" and m.win_prob is not None:
+                        accepted = m.win_prob
+                        m.win_prob = 0.5 * accepted + 0.5 * pass_move.win_prob  # type: ignore[operator]
+                        m.detail += f" · {accepted * 100:.0f}% if accepted"
             # Rank by MC win rate; the heuristic may shift a move by at most half a
             # standard error, so it only decides between statistically tied moves.
             se = 0.5 * math.sqrt(0.25 / self.rollouts)
@@ -618,6 +702,8 @@ class CatanEngine:
         wins = {c: 0.0 for c in game.order}
         sim_static = _SimStatic(game.board)
         for i in range(n):
+            if self.should_stop is not None and i % 8 == 0 and self.should_stop():
+                raise AnalysisCancelled()
             rng = random.Random(self.seed * 100003 + i)  # common random numbers
             sim = _Sim(sim_static, game, rng)
             start = (game.current + 1) % len(game.order) if start_next_turn else game.current

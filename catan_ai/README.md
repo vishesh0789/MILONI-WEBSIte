@@ -19,43 +19,71 @@ screenshot ──► vision_extractor ──► board JSON ──► GameState �
                                                  CatanEngine ──► Optimal Move / Alternative / Win %
 ```
 
-## Quick start
+## Quick start (Mac)
+
+1. Install Python 3.10 or newer once: `brew install python@3.12` (or from python.org).
+2. Get the code and open the folder:
+   ```bash
+   git clone https://github.com/vishesh0789/MILONI-WEBSIte.git
+   cd MILONI-WEBSIte && git checkout claude/catan-game-ai-system-2gpqzu && cd catan_ai
+   ```
+3. **Double-click `start.command`** in Finder, or run `./start.command` in Terminal.
+   The first run sets up a private Python environment (`.venv`) and installs what it needs, then
+   the analysis board opens in your browser. Keep the Terminal window open while you play.
+   * `./start.command --me red` sets your colour.
+   * `./start.command --resume` continues the last game.
+
+If macOS says the file can't be opened, right-click it, choose **Open**, then **Open** again (needed
+once). Other ways to run it:
 
 ```bash
-cd catan_ai
-pip install -r requirements.txt          # numpy + opencv for vision; core runs on stdlib only
-python run_demo.py                       # example board, dice sequence, AI advice
-python run_demo.py --vision              # also renders a synthetic screenshot and extracts it
-python -m pytest                         # 27 tests
-python -m catan.gui_server --me red      # analysis board GUI at http://127.0.0.1:8765
-
-# live play
-python -m catan.vision_extractor shot.png -o board.json --debug overlay.png
-python -m catan.state_manager board.json --me red
+python -m catan.gui_server --me red      # the analysis board (what start.command runs)
+python -m catan.state_manager board.json --me red   # keyboard-only tracker in the terminal
+python run_demo.py [--vision]            # scripted demo: d 6, d 8, d 7 and AI advice
+python -m pytest                         # 37 tests
 ```
 
 ## Analysis board GUI
 
-```bash
-python -m catan.gui_server                     # example board
-python -m catan.gui_server board.json --me red # your extracted board, you are red
-```
-
 A local server (standard library only) opens a browser page that drives the same `GameState` and
-`CatanEngine` as the CLI:
+`CatanEngine` as the CLI. Press **?** on the page for the built-in guide.
 
-* **Board.** Tiles, number tokens with pips, ports, roads, settlements, cities and the robber.
-  Engine overlays show the top 3 moves as numbered badges (node, edge or tile), the best road plan
-  as a dashed path with a ghost settlement, and a heatmap of the best open spots.
-* **Win bar.** Monte Carlo win % for each player, stacked, with yours at the bottom.
-* **Engine panel.** Top 5 lines with win %, detail and a **▶ play** button. Live analysis re-runs
-  after every move. Depth runs from instant (heuristic only) to deep (200 rollouts); the header
-  shows the ± noise.
-* **Click to play.** Click a corner to build a settlement (or a city on your own settlement), an
-  edge for a road, a tile to move the robber, then pick who to steal from. Dice buttons, end turn,
-  undo, and the same command line as the CLI. Click a player row to make them the acting player.
-* **Load.** Drop a Colonist screenshot on the board (runs the vision extractor), or load or save
-  game JSON.
+* **Any starting point.**
+  * *New game ▾* offers a random board or the example board, both starting from setup, or the
+    example game with pieces already placed.
+  * *Open ▾* reads a Colonist screenshot (or drop one on the board) or loads a saved game.
+  * After a screenshot the board opens in **Edit board** mode so you can fix misreads. Click a
+    tile to change its terrain, number or the robber; a coastal edge for its port; a corner or
+    edge to place or remove pieces of any colour.
+* **Setup (snake draft).** While players have fewer than two settlements and roads, clicks place
+  pieces for free in snake order. The second settlement pays its starting cards, and the engine
+  ranks placements with rings on the board.
+* **Each turn.**
+  * Click the number rolled (or type it), then click the board for builds: a corner for a
+    settlement (your own settlement becomes a city), an edge for a road, a tile for the robber
+    and who to steal from.
+  * **Trade** covers bank or port trades at your best rate and player trades. **Dev card** covers
+    buying (you pick what you drew) and playing knight, road building, VP, monopoly and year of
+    plenty.
+  * On a 7, the banner lists who must discard, with a card picker and the engine's pick.
+  * Click a player row to log moves for that player.
+* **Joining mid-game.** ✎ next to a player sets their hand (exact, or just a card count) and their
+  dev cards and knights.
+* **Engine.**
+  * Lines show the win % after each move, and **▶ play** applies one. A trade offer asks who
+    accepted, and buying a dev card asks which card you drew.
+  * Before the roll the advice is "Roll the dice", or a knight first when that's better.
+  * Trade offers are scored as 50% likely to be accepted.
+  * Analysis is progressive: an instant estimate first, then the simulation. It never blocks
+    clicks, and a newer position cancels the old analysis.
+  * The board shows numbered rings for the top 3 moves, a dashed road plan with a ghost
+    settlement, and a heatmap of the best open spots.
+  * The win bar shows everyone's chances, yours at the bottom.
+* **Safety nets.**
+  * Every move is autosaved to `~/.catan_ai/autosave.json`. *New game ▾* offers "Resume last
+    session's game" and "Back to the previous game", in case you started a new one by mistake.
+  * Undo with the button or Ctrl/⌘+Z.
+  * If port 8765 is busy, the server picks the next free port.
 
 ## Hex coordinate system and numbering
 
@@ -146,7 +174,18 @@ on a labelled screenshot to re-fit the terrain colours. If localisation fails, p
 | `tp <a> <b> <a_gives> <b_gives>` | `tp red blue 2w o` | Player-to-player trade |
 | `p <player> <card> [args]` | `p red knight`, `p red mono w`, `p red yop o o`, `p red rb 12 13` | Play a dev card |
 | `g` / `l <player> <cards>` | `g red o` | Manual correction (gain from / return to the bank) |
-| `n`, `me <p>`, `s`, `u`, `ai [p]`, `save f.json` | | Next turn, set perspective, show, undo, AI advice, save |
+| `8` | | A bare number is a dice roll |
+| `hand <player> <cards>` / `hand <player> <n>` | `hand blue 2w o`, `hand blue 5` | Set a hand exactly, or as n cards of unknown type (joining mid-game) |
+| `devs <player> <unplayed> [knights]` | `devs blue 2 1` | Set dev cards held and knights already played |
+| `tile <hex> [terrain] [number] [robber]` | `tile 4 hills 6` | Fix a tile (also `tile 4 robber`) |
+| `port <edge> <type>` | `port 20-26 ore`, `port 12 none` | Set or remove a port on a coastal edge |
+| `piece <node\|a-b> <player\|none> [city]` | `piece 24 red city` | Place or remove a piece without rules or costs |
+| `n`, `me <p>`, `s`, `u`, `ai [p]`, `help`, `save f.json` | | Next turn, set perspective, show, undo, AI advice, all commands, save |
+
+**Setup** is detected automatically while players have fewer than two settlements and roads:
+`b <player> s <node>` and `b <player> r <edge>` are then free, a setup road must touch the new
+settlement, the second settlement pays its starting cards, and turns follow the snake order. Dice
+are refused until setup is complete.
 
 Resource aliases: `w`/wood, `b`/brick, `s`/sheep, `g`/wheat (grain), `o`/ore. Counts can be written
 as `2w`, `w:2`, `w+w` or `w,w`. Players accept colour prefixes. In `t`, a lone `w`, `b` or `o` is
@@ -197,12 +236,22 @@ Alternative: [Move Robber to hex 11 (mountains 8), steal from red]
 Expected Win % / Position Score: [63.7% / 5.81]
 ```
 
-Main-phase candidates are cities, settlements, roads along the best plans, dev cards, port or bank
-trades that unlock a build this turn, 1:1 table-trade offers, knights (for your own hand) and
-ending the turn.
+Main-phase candidates are:
+* cities, settlements, and roads along the best plans
+* dev cards
+* port or bank trades that unlock a build this turn
+* 1:1 table-trade offers, scored as 50% likely to be accepted
+* knights (for your own hand)
+* ending the turn
+
+During setup the engine ranks settlement spots (for the second settlement it also lists the
+starting cards) and the roads that point toward the best free spot. Before the roll it recommends
+rolling, or a knight first.
 
 ## Limitations
 
+* Before the roll the only advice is to roll (or play a knight first). In Catan you can't build
+  before rolling.
 * Vision has only been tested on synthetic renders. Real screenshots need the one-off
   `calibrate` step, and OCR is recommended for non-Hershey fonts.
 * The rollout policy is greedy and simplified: no player-to-player trades, and a basic

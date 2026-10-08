@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
@@ -470,6 +471,38 @@ class Board:
 def default_ports(types: Iterable[str] = DEFAULT_PORT_TYPES) -> list[Port]:
     topo = build_topology()
     return [Port(t, topo.edge_nodes[e]) for t, e in zip(types, topo.port_slot_edges())]
+
+
+def random_board_dict(seed: int | None = None) -> dict[str, Any]:
+    """A legal random base-game board (no adjacent 6/8) with shuffled port types, no pieces."""
+    rng = random.Random(seed)
+    topo = build_topology()
+    terrains = [t for t, k in TERRAIN_COUNTS.items() for _ in range(k)]
+    numbers = [n for n, k in NUMBER_COUNTS.items() for _ in range(k)]
+    neighbours = [{h2 for n in topo.hex_nodes[h] for h2 in topo.node_hexes[n] if h2 != h}
+                  for h in range(topo.num_hexes)]
+    while True:
+        rng.shuffle(terrains)
+        rng.shuffle(numbers)
+        it = iter(numbers)
+        nums = [None if t == Terrain.DESERT else next(it) for t in terrains]
+        if all(not (nums[h] in (6, 8) and any(nums[o] in (6, 8) for o in neighbours[h]))
+               for h in range(topo.num_hexes)):
+            break
+    port_types = list(DEFAULT_PORT_TYPES)
+    rng.shuffle(port_types)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source": "random",
+        "layout": {"orientation": "pointy", "radius": 2},
+        "hexes": [{"id": h, "q": q, "r": r, "terrain": terrains[h].value, "number": nums[h]}
+                  for h, (q, r) in enumerate(topo.hex_coords)],
+        "ports": [{"type": t, "nodes": list(topo.edge_nodes[e])}
+                  for t, e in zip(port_types, topo.port_slot_edges())],
+        "robber_hex": terrains.index(Terrain.DESERT),
+        "turn_order": list(PLAYER_COLORS),
+        "players": [],
+    }
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
