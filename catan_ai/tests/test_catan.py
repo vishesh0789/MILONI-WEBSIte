@@ -548,3 +548,69 @@ def test_vision_on_real_colonist_screenshot(variant: str) -> None:
     assert sorted([p["type"], p["nodes"]] for p in data["ports"]) == sorted(truth["ports"])
     assert not any(p["settlements"] or p["cities"] or p["roads"] for p in data["players"])  # empty board
     GameState.from_dict(data)
+
+
+# -- free control: names, order, any setup order, editable log --------------------------
+
+
+def test_names_order_and_free_setup_order(blank: GameState) -> None:
+    g = blank
+    g.execute("name blue Coron")
+    assert g.resolve_player("coron") == "blue" and g.resolve_player("#blue") == "blue"
+    g.execute("b coron s 0")            # blue first, not red: any order is fine
+    g.execute("b blue r 0-3")
+    g.execute("b blue s 28")            # blue's second settlement pays starting cards right away
+    assert g.hand_total("blue") > 0
+    assert g.pending_setup("blue") == "road" and g.pending_setup("red") == "settlement"
+    rec = CatanEngine(g, rollouts=0).recommend("orange")
+    assert rec.player == "orange" and rec.phase == "setup"
+    g.execute("order white orange blue red")
+    assert g.order == ["white", "orange", "blue", "red"]
+    assert g.hand_total("blue") > 0     # hands follow their players when the order changes
+    assert_conservation(g)
+
+
+def test_devs_with_vp_cards(game: GameState) -> None:
+    deck = game.dev_deck
+    game.execute("devs red 1 0 2")
+    assert game.players["red"].vp_cards == 2 and game.public_vp("red") == 4 and game.dev_deck == deck - 3
+    game.execute("devs red 0 0 0")
+    assert game.public_vp("red") == 2 and game.dev_deck == deck
+
+
+def test_session_log_delete_rewind_and_recolor(data: dict) -> None:
+    from catan.gui_server import Session
+
+    s = Session(GameState.from_dict(data), autosave_path=None)
+    s.run_command("8")                    # red +2 ore, blue +2 wood
+    s.run_command("g red 2wheat")
+    s.run_command("b red city 20")        # paid by the 8 and the gain
+    s.run_command("n")
+    assert 20 in s.game.players["red"].cities
+    roll = s.actions[0]["id"]
+    problems = s.delete(roll)            # the city really happened: kept, with a note about missing cards
+    assert any("b red city 20" in p and "missed income" in p for p in problems)
+    assert 20 in s.game.players["red"].cities and s.game.current_color == "blue"
+    s.undo()                              # undo the end-of-turn
+    assert s.game.current_color == "red"
+    s.recolor({"orange": "black"})
+    assert "black" in s.game.order and "orange" not in s.game.order
+    assert s.game.players["black"].settlements == {14, 40}
+    s.run_command("b black road 16")
+    gain = next(a["id"] for a in s.actions if a.get("line", "").startswith("g red"))
+    s.rewind(gain)                        # back to before the gain
+    assert all(a["id"] < gain or a["kind"] not in ("command", "apply") for a in s.actions)
+    assert s.game.expected_hand("red") == [0, 1, 0, 0, 1]
+
+
+def test_session_delete_drops_moves_that_no_longer_fit(data: dict) -> None:
+    from catan.gui_server import Session
+
+    d = json.loads(json.dumps(data))
+    d["players"] = []
+    s = Session(GameState.from_dict(d), autosave_path=None)
+    s.run_command("b red s 20")
+    s.run_command("b red r 20-26")
+    problems = s.delete(s.actions[0]["id"])   # remove the settlement: its road has nothing to attach to
+    assert problems and "dropped" in problems[0]
+    assert not s.game.players["red"].roads and not s.actions

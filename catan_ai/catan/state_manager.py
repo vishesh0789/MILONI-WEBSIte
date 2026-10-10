@@ -26,7 +26,9 @@ the snake.
 Corrections (joining mid-game, fixing a misread screenshot)::
 
     hand <player> <cards> | <n>      set a hand exactly (``hand red 2w o``) or as n unknown cards
-    devs <player> <unplayed> [knights]   set dev cards held and knights already played
+    devs <player> <unplayed> [knights] [vp]   set dev cards held, knights played, VP cards shown
+    name <player> <name>             label a player (``name black PrideNL``); names work in commands
+    order <p1> <p2> <p3> <p4>        set the turn order
     tile <hex> [terrain] [number] [robber]   ``tile 4 hills 6``, ``tile 9 desert``, ``tile 4 robber``
     port <edge|a-b> <3:1|res|none>   set or remove the port on a coastal edge
     piece <node|a-b|eN> <player|none> [city]   place/remove a piece without rules or costs
@@ -330,6 +332,7 @@ class GameState:
     perspective: str | None = None
     log: list[str] = field(default_factory=list)
     last_roll: int | None = None
+    names: dict[str, str] = field(default_factory=dict)   # player colour -> display name
     _history: list["GameState"] = field(default_factory=list, repr=False)
 
     # -- construction ------------------------------------------------------
@@ -384,6 +387,7 @@ class GameState:
             game.current = game.order.index(data["current_player"])
         game.turn_number = int(data.get("turn_number", 1))
         game.perspective = data.get("perspective")
+        game.names = {c: str(n) for c, n in (data.get("names") or {}).items() if c in game.players}
         game.phase = data.get("phase", "main")
         game.pending_discards = {k: int(v) for k, v in data.get("pending_discards", {}).items()}
         game.last_roll = data.get("last_roll")
@@ -407,6 +411,7 @@ class GameState:
         out["current_player"] = self.current_color
         out["turn_number"] = self.turn_number
         out["perspective"] = self.perspective
+        out["names"] = self.names
         out["players"] = [
             {"color": c, "settlements": sorted(p.settlements), "cities": sorted(p.cities),
              "roads": sorted(p.roads), "dev_cards": p.dev_hidden,
@@ -442,6 +447,14 @@ class GameState:
                 return c, "road"
         return None
 
+    def pending_setup(self, color: str) -> str | None:
+        """What this player still has to place in setup (any order), if anything."""
+        p = self.players[color]
+        b, r = len(p.buildings()), len(p.roads)
+        if b >= 2 and r >= 2:
+            return None
+        return "settlement" if b <= r and b < 2 else "road"
+
     def _refresh_setup(self) -> str:
         nxt = self.setup_next()
         if nxt:
@@ -468,11 +481,24 @@ class GameState:
         return self.order.index(color)
 
     def resolve_player(self, token: str) -> str:
-        t = token.lower()
+        """A colour (or unique prefix), '#colour', or a player's name (or unique prefix)."""
+        t = token.lower().lstrip("#")
+        if t in self.order:
+            return t
+        named = [c for c, n in self.names.items() if n.lower() == t]
+        if len(named) == 1:
+            return named[0]
         matches = [c for c in self.order if c.startswith(t)]
-        if len(matches) != 1:
-            raise CommandError(f"unknown/ambiguous player '{token}'")
-        return matches[0]
+        if len(matches) == 1:
+            return matches[0]
+        if len(t) >= 3:
+            named = [c for c, n in self.names.items() if n.lower().startswith(t)]
+            if len(named) == 1:
+                return named[0]
+        raise CommandError(f"unknown or ambiguous player '{token}' (players: {', '.join(self.order)})")
+
+    def label(self, color: str) -> str:
+        return f"{self.names[color]} ({color})" if self.names.get(color) else color
 
     def is_player_token(self, token: str) -> bool:
         try:
@@ -868,10 +894,7 @@ class GameState:
         """Free setup placement; the second settlement pays its starting resources."""
         color, item = ev["player"], ev["item"]
         ps = self.players[color]
-        expected = self.setup_next()
         note = ""
-        if expected and expected != (color, item):
-            note = f" (note: expected {expected[0]} to place a {expected[1]})"
         if item == "settlement":
             node = int(ev["target"])
             if not 0 <= node < self.board.topology.num_nodes:
@@ -891,12 +914,11 @@ class GameState:
         else:
             edge = self._parse_edge(ev["target"])
             topo = self.board.topology
-            bare = [n for n in ps.buildings() if not any(e in ps.roads for e in topo.node_edges[n])]
-            if not bare:
-                raise CommandError(f"{color} has no settlement waiting for a road - place the settlement first")
-            if self.edge_owner(edge) or not set(topo.edge_nodes[edge]) & set(bare):
-                raise CommandError(f"a setup road must touch {color}'s new settlement "
-                                   f"(node {', '.join(map(str, bare))})")
+            if self.edge_owner(edge):
+                raise CommandError(f"edge {edge} already has a road")
+            if not self.can_place_road(color, edge):
+                raise CommandError(f"a road must connect to {color}'s settlement or roads "
+                                   "(use Edit board / 'piece' to place it anywhere)")
             ps.roads.add(edge)
             a, b = self.board.topology.edge_nodes[edge]
             msg = f"{color} placed a road on edge {edge} ({a}-{b})"
@@ -991,14 +1013,41 @@ class GameState:
         p = self.players[ev["player"]]
         dev = int(ev.get("dev", p.dev_hidden))
         knights = int(ev.get("knights", p.knights_played))
-        delta = (dev - p.dev_hidden) + (knights - p.knights_played)
+        vp = int(ev.get("vp", p.vp_cards))
+        if min(dev, knights, vp) < 0:
+            raise CommandError("dev card counts cannot be negative")
+        delta = (dev - p.dev_hidden) + (knights - p.knights_played) + (vp - p.vp_cards)
         if delta > self.dev_deck:
             raise CommandError("not enough cards left in the dev deck")
         self.dev_deck -= delta
-        p.dev_hidden, p.knights_played = dev, knights
-        p.dev_played["knight"] = knights
+        p.dev_hidden, p.knights_played, p.vp_cards = dev, knights, vp
+        p.dev_played["knight"], p.dev_played["vp"] = knights, vp
+        if self.largest_army_owner == ev["player"] and knights < 3:
+            self.largest_army_owner = None
         self._update_largest_army()
-        return f"{ev['player']}: {dev} unplayed dev cards, {knights} knights played"
+        return f"{ev['player']}: {dev} unplayed dev cards, {knights} knights played, {vp} VP cards shown"
+
+    def _ev_set_name(self, ev: Mapping[str, Any]) -> str:
+        color, name = ev["player"], str(ev.get("name") or "").strip()
+        if name:
+            self.names[color] = name[:24]
+            return f"{color} is {name[:24]}"
+        self.names.pop(color, None)
+        return f"{color} has no name"
+
+    def _ev_set_order(self, ev: Mapping[str, Any]) -> str:
+        new = list(ev["order"])
+        if sorted(new) != sorted(self.order):
+            raise CommandError(f"the new order must list each player once: {', '.join(self.order)}")
+        cur = self.current_color
+        old_states = self.belief.states
+        idx = [self.order.index(c) for c in new]
+        self.belief.states = {tuple(s[i] for i in idx): w for s, w in old_states.items()}
+        self.order = new
+        self.current = new.index(cur)
+        if self.phase == "setup":
+            self._refresh_setup()
+        return "turn order: " + ", ".join(self.label(c) for c in new)
 
     def _ev_bank_trade(self, ev: Mapping[str, Any]) -> str:
         color = ev.get("player") or self.current_color
@@ -1230,11 +1279,20 @@ def parse_command(line: str, game: GameState) -> dict[str, Any]:
             return {"type": "set_hand", "player": player, "count": int(args[1])}
         return {"type": "set_hand", "player": player, "cards": parse_resource_list(args[1:])}
     if cmd in ("devs", "dev"):
-        need(2, "devs <player> <unplayed> [knights_played]")
+        need(2, "devs <player> <unplayed> [knights_played] [vp_cards_shown]")
         ev = {"type": "set_dev", "player": game.resolve_player(args[0]), "dev": int(args[1])}
         if len(args) > 2:
             ev["knights"] = int(args[2])
+        if len(args) > 3:
+            ev["vp"] = int(args[3])
         return ev
+    if cmd == "name":
+        need(1, "name <player> [name]")
+        raw = shlex.split(line.strip())[2:]   # keep the name's original case
+        return {"type": "set_name", "player": game.resolve_player(args[0]), "name": " ".join(raw)}
+    if cmd == "order":
+        need(len(game.order), "order <player> <player> ... (every player once)")
+        return {"type": "set_order", "order": [game.resolve_player(a) for a in args]}
     if cmd == "tile":
         need(2, "tile <hex> [terrain] [number] [robber]")
         ev = {"type": "edit_tile", "hex": int(args[0])}

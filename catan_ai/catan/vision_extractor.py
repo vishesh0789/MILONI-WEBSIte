@@ -75,8 +75,12 @@ class VisionConfig:
     })
     water_rgb: RGB = (48, 128, 196)
     token_rgb: RGB = (246, 232, 200)
+    # red/blue/orange/white match the synthetic renderer; the others are estimates of Colonist's
+    # piece colours and have not been checked against real pieces yet.
     player_rgb: dict[str, RGB] = field(default_factory=lambda: {
         "red": (222, 40, 40), "blue": (40, 90, 222), "orange": (250, 150, 10), "white": (250, 250, 250),
+        "black": (40, 40, 44), "green": (60, 170, 70), "purple": (130, 60, 170), "brown": (130, 80, 40),
+        "pink": (240, 120, 180), "gray": (150, 150, 150),
     })
     port_rgb: dict[str, RGB] = field(default_factory=lambda: {
         PORT_GENERIC: (255, 255, 255),

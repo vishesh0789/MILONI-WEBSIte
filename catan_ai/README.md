@@ -40,7 +40,7 @@ once). Other ways to run it:
 python -m catan.gui_server --me red      # the analysis board (what start.command runs)
 python -m catan.state_manager board.json --me red   # keyboard-only tracker in the terminal
 python run_demo.py [--vision]            # scripted demo: d 6, d 8, d 7 and AI advice
-python -m pytest                         # 44 tests
+python -m pytest                         # 48 tests
 ```
 
 ## Analysis board GUI
@@ -55,9 +55,9 @@ A local server (standard library only) opens a browser page that drives the same
   * After a screenshot the board opens in **Edit board** mode so you can fix misreads. Click a
     tile to change its terrain, number or the robber; a coastal edge for its port; a corner or
     edge to place or remove pieces of any colour.
-* **Setup (snake draft).** While players have fewer than two settlements and roads, clicks place
-  pieces for free in snake order. The second settlement pays its starting cards, and the engine
-  ranks placements with rings on the board.
+* **Setup.** While players have fewer than two settlements and roads, clicks place pieces for
+  free, in any order and for whichever player you select. The second settlement pays its starting
+  cards, and the engine ranks placements for the selected player with rings on the board.
 * **Each turn.**
   * Click the number rolled (or type it), then click the board for builds: a corner for a
     settlement (your own settlement becomes a city), an edge for a road, a tile for the robber
@@ -67,8 +67,24 @@ A local server (standard library only) opens a browser page that drives the same
     plenty.
   * On a 7, the banner lists who must discard, with a card picker and the engine's pick.
   * Click a player row to log moves for that player.
-* **Joining mid-game.** ✎ next to a player sets their hand (exact, or just a card count) and their
-  dev cards and knights.
+* **Free control.**
+  * **Players** sets any colours (red, blue, orange, white, black, green, purple, brown, pink,
+    gray), names (usable in commands) and the turn order. Changing a colour rewrites every piece
+    and logged move.
+  * Click any settlement, city or road to upgrade it, downgrade it, remove it or give it to
+    another player.
+  * Click a card count to add or remove that card. ✎ sets a whole hand (exact, or just a count),
+    unplayed dev cards, knights played and VP cards shown.
+  * The selected player stays selected until you change it, and setup can be placed in any
+    order.
+  * The engine never moves on its own: ▶ play needs a second click to apply.
+* **Editable game log.** Every move has **✕ delete** and **↶ back to here**.
+  * Deleting replays the game from its start without that move. Later moves that no longer fit
+    are dropped and listed. Builds that are now short of cards are kept, with a note that the
+    tracker assumed income that wasn't logged.
+  * Rewinding removes the move and everything after it.
+  * Undo removes the last move the same way.
+  * The log is saved with the game, so it stays editable after a restart.
 * **Engine.**
   * Lines show the win % after each move, and **▶ play** applies one. A trade offer asks who
     accepted, and buying a dev card asks which card you drew.
@@ -204,16 +220,18 @@ terrain colours for an unusual theme.
 | `g` / `l <player> <cards>` | `g red o` | Manual correction (gain from / return to the bank) |
 | `8` | | A bare number is a dice roll |
 | `hand <player> <cards>` / `hand <player> <n>` | `hand blue 2w o`, `hand blue 5` | Set a hand exactly, or as n cards of unknown type (joining mid-game) |
-| `devs <player> <unplayed> [knights]` | `devs blue 2 1` | Set dev cards held and knights already played |
+| `devs <player> <unplayed> [knights] [vp]` | `devs blue 2 1 0` | Set dev cards held, knights already played, VP cards shown |
+| `name <player> <name>` | `name black PrideNL` | Name a player; names work in every command |
+| `order <p1> <p2> <p3> <p4>` | `order red blue black orange` | Set the turn order |
 | `tile <hex> [terrain] [number] [robber]` | `tile 4 hills 6` | Fix a tile (also `tile 4 robber`) |
 | `port <edge> <type>` | `port 20-26 ore`, `port 12 none` | Set or remove a port on a coastal edge |
 | `piece <node\|a-b> <player\|none> [city]` | `piece 24 red city` | Place or remove a piece without rules or costs |
 | `n`, `me <p>`, `s`, `u`, `ai [p]`, `help`, `save f.json` | | Next turn, set perspective, show, undo, AI advice, all commands, save |
 
 **Setup** is detected automatically while players have fewer than two settlements and roads:
-`b <player> s <node>` and `b <player> r <edge>` are then free, a setup road must touch the new
-settlement, the second settlement pays its starting cards, and turns follow the snake order. Dice
-are refused until setup is complete.
+`b <player> s <node>` and `b <player> r <edge>` are then free, in any order. A road must connect
+to that player's pieces (`piece` places anything anywhere), the second settlement pays its
+starting cards, and dice are refused until setup is complete.
 
 Resource aliases: `w`/wood, `b`/brick, `s`/sheep, `g`/wheat (grain), `o`/ore. Counts can be written
 as `2w`, `w:2`, `w+w` or `w,w`. Players accept colour prefixes. In `t`, a lone `w`, `b` or `o` is

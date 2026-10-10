@@ -148,6 +148,13 @@ svg#board { flex: 1; min-width: 0; width: 100%; height: auto; display: block; ma
 .mv .d { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .play { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 4px 8px; font-size: 12px; white-space: nowrap; }
 .play:hover { border-color: var(--accent); color: var(--accent); }
+.play.armed { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.res.click { cursor: pointer; }
+.res.click:hover { outline: 2px solid var(--fg); }
+.feed .acts { display: flex; gap: 4px; margin-top: 3px; }
+.feed .acts button { border: 1px solid var(--line); background: var(--panel); border-radius: 5px; padding: 0 6px; font-size: 11px; color: var(--muted); }
+.feed .acts button:hover { border-color: var(--danger); color: var(--danger); }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 .analyzing { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
 .spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg) } }
@@ -160,7 +167,7 @@ table.players { width: 100%; border-collapse: collapse; font-variant-numeric: ta
 .players tr.turn td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .players tr[data-actor] { cursor: pointer; }
 .players tr.actor td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-.pname { display: flex; gap: 6px; align-items: center; font-weight: 600; text-transform: capitalize; }
+.pname { display: flex; gap: 6px; align-items: center; font-weight: 600; }
 .vp { font: 700 16px var(--display); }
 .hand { display: flex; gap: 3px; flex-wrap: wrap; }
 .res { min-width: 26px; padding: 1px 4px; border-radius: 4px; font: 600 11px var(--mono); text-align: center; color: #12202a; }
@@ -209,6 +216,7 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
     <button class="btn" id="btn-new">New game ▾</button>
     <button class="btn" id="btn-open">Open ▾</button>
     <button class="btn" id="btn-save" title="Download this game as a JSON file">Save</button>
+    <button class="btn" id="btn-players" title="Colours, names and turn order">Players</button>
     <span class="group"><select id="opt-me" title="Your colour: your own hand is tracked exactly"></select></span>
     <span class="group">
       <label class="toggle" for="opt-live" title="Re-analyse after every move"><input type="checkbox" id="opt-live" checked> Engine</label>
@@ -276,17 +284,20 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
     <h3>Quick start</h3>
     <ol>
       <li><b>Get the board in.</b> Use <i>New game ▾ → Random board</i> to practise, or <i>Open ▾ → Read Colonist screenshot</i> (or drag a screenshot onto the board) for a real game. After a screenshot, the board opens in <b>Edit board</b> mode: click anything that was read wrong.</li>
-      <li><b>Pick your colour</b> in the <i>Me</i> menu. Your own hand is then tracked exactly.</li>
-      <li><b>Setup.</b> If nobody has placed yet, the board walks the snake draft: click a corner for each settlement and an edge for its road. The engine rings its best spots and pays the starting cards.</li>
+      <li><b>Set up the players</b> with <b>Players</b>: colours (black, green… too), names and turn order. Then pick yourself in the <i>Me</i> menu so your own hand is tracked exactly.</li>
+      <li><b>Setup, in any order.</b> Click a player row, then click a corner for a settlement and an edge for a road. Switch players whenever you like. The engine rings the best spots for the selected player, and second settlements collect their starting cards.</li>
       <li><b>Play along.</b> Each turn click the number rolled, click the board for whatever was built, and press <b>End turn</b>. <b>Trade</b> and <b>Dev card</b> cover the rest. The engine updates after every move; <b>▶ play</b> applies a suggestion.</li>
       <li><b>Joining mid-game?</b> Press ✎ next to each player to set their cards and dev cards.</li>
     </ol>
     <h3>Mouse</h3>
     <div class="scroll"><table>
-      <tr><td>Corner</td><td>build a settlement; on your own settlement, upgrade it to a city</td></tr>
-      <tr><td>Edge</td><td>build a road</td></tr>
+      <tr><td>Empty corner / edge</td><td>build a settlement / road for the selected player</td></tr>
+      <tr><td>Any piece</td><td>upgrade, downgrade, remove it, or give it to another player</td></tr>
+      <tr><td>Card count</td><td>add or remove that card for that player (✎ edits the whole hand and dev cards)</td></tr>
+      <tr><td>Game log</td><td><b>✕ delete</b> removes just that move and replays the rest; <b>↶ back to here</b> rewinds the game</td></tr>
+      <tr><td>▶ play</td><td>click once to arm, again to apply: the engine never moves on its own</td></tr>
       <tr><td>Tile</td><td>move the robber and choose who to steal from</td></tr>
-      <tr><td>Player row</td><td>build for that player and show their advice (to log other players' moves)</td></tr>
+      <tr><td>Player row</td><td>select who you are building for; it stays selected until you change it</td></tr>
       <tr><td>Edit board</td><td>tiles: terrain, number, robber · coastal edges: ports · corners and edges: pieces of any colour</td></tr>
     </table></div>
     <h3>Keyboard</h3>
@@ -305,7 +316,8 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
       <tr><td><code>t w o</code> · <code>t red 4w o</code></td><td>bank or port trade at the best rate</td></tr>
       <tr><td><code>tp red blue 2w o</code></td><td>red gives 2 wood to blue for 1 ore</td></tr>
       <tr><td><code>p red knight</code> · <code>mono w</code> · <code>yop o o</code> · <code>rb</code> · <code>vp</code></td><td>play a dev card</td></tr>
-      <tr><td><code>hand blue 2w o</code> · <code>hand blue 5</code> · <code>devs blue 2 1</code></td><td>set a hand (exact, or just a count) · dev cards held and knights played</td></tr>
+      <tr><td><code>hand blue 2w o</code> · <code>hand blue 5</code> · <code>devs blue 2 1 0</code></td><td>set a hand (exact, or just a count) · dev cards held, knights played, VP cards shown</td></tr>
+      <tr><td><code>name black PrideNL</code> · <code>order red blue black orange</code></td><td>name a player (names work in commands) · set the turn order</td></tr>
       <tr><td><code>tile 4 hills 6</code> · <code>port 20-26 ore</code> · <code>piece 24 red city</code></td><td>fix the board</td></tr>
       <tr><td><code>n</code> · <code>u</code> · <code>help</code></td><td>end turn · undo · list every command</td></tr>
     </table></div>
@@ -320,7 +332,8 @@ const TERRAIN_EDGE = { forest: "#24603a", hills: "#9c4c2b", pasture: "#739a45", 
 const TERRAIN_RES = { forest: "wood", hills: "brick", pasture: "sheep", fields: "wheat", mountains: "ore", desert: "" };
 const RES_COLOR = { wood: "#3f9a58", brick: "#d27548", sheep: "#a9d46e", wheat: "#f0c84f", ore: "#a3afba", "3:1": "#f4f1ea" };
 const RES_SHORT = { wood: "wo", brick: "br", sheep: "sh", wheat: "wh", ore: "or" };
-const PLAYER = { red: "#d63a3a", blue: "#2f6fdc", orange: "#f08a1c", white: "#f4f4f0" };
+const PLAYER = { red: "#d63a3a", blue: "#2f6fdc", orange: "#f08a1c", white: "#f4f4f0", black: "#2b2d31",
+  green: "#3aa655", purple: "#8e5bd0", brown: "#8b5a2b", pink: "#ec7fb5", gray: "#9aa3ab" };
 const RANK = ["#4cc38a", "#e8b93c", "#8aa2c4", "#b58ad6", "#9aa5b1"];
 const PIPS = { 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 8: 5, 9: 4, 10: 3, 11: 2, 12: 1 };
 const DEV = [["knight", "Knight"], ["vp", "Victory point"], ["road_building", "Road building"], ["year_of_plenty", "Year of plenty"], ["monopoly", "Monopoly"]];
@@ -338,7 +351,9 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const pct = (x) => (x == null ? "—" : (x * 100).toFixed(1) + "%");
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const player = (c) => S.players.find((p) => p.color === c);
-const dotHtml = (c) => `<span class="dot" style="background:${PLAYER[c]}"></span>`;
+const dotHtml = (c) => `<span class="dot" style="background:${PLAYER[c] || "#888"}"></span>`;
+const pname = (c) => { const p = S && S.players.find((q) => q.color === c); return p && p.name ? esc(p.name) : cap(c); };
+const inkOf = (c) => (["white", "gray", "pink"].includes(c) ? "var(--fg)" : PLAYER[c]);
 const vecStr = (v) => (v.some((n) => n > 0) ? S.resources.map((r, i) => (v[i] ? `${v[i]}${r}` : "")).filter(Boolean).join("+") : "0wood");
 const resKeys = () => S.resources;
 const zeroRes = () => Object.fromEntries(S.resources.map((r) => [r, 0]));
@@ -368,9 +383,8 @@ function toast(msg, ms = 3200, err = false) {
 
 function setState(state) {
   if (!state || state.offline) return;
-  const turnChanged = !S || S.current !== state.current || S.turn !== state.turn || S.phase !== state.phase;
   S = state;
-  if (turnChanged || !S.order.includes(actor)) actorPinned = false;
+  if (!S.order.includes(actor)) actorPinned = false;   // the selected player stays selected until you change it
   if (!actorPinned) actor = S.setup_next ? S.setup_next[0] : S.current;
   if (S.phase !== "main") freeRoads = 0;
   renderAll();
@@ -577,18 +591,100 @@ function onBoardClick(e) {
   if (editMode) return onEditClick(e);
   if (t.dataset.node !== undefined) {
     const n = Number(t.dataset.node), own = nodeOwner(n);
-    if (own && own[0] === who && own[1] === "s" && S.phase !== "setup") return send(`b ${who} c ${n}`);
-    if (own) return toast(`Corner ${n} already has ${own[0]}'s ${own[1] === "s" ? "settlement" : "city"}. Use Edit board to change it.`);
+    if (own) return piecePop(n, own, e.clientX, e.clientY);
     return send(`b ${who} s ${n}`);
   }
   if (t.dataset.edge !== undefined) {
-    if (freeRoads > 0) { freeRoads--; return send(`b ${who} r ${t.dataset.edge} free`); }
-    return send(`b ${who} r ${t.dataset.edge}`);
+    const ed = Number(t.dataset.edge), own = edgeOwner(ed);
+    if (own) return roadPop(ed, own, e.clientX, e.clientY);
+    if (freeRoads > 0) { freeRoads--; return send(`b ${who} r ${ed} free`); }
+    return send(`b ${who} r ${ed}`);
   }
   if (t.dataset.hex !== undefined) {
     if (S.phase === "setup") return toast("Finish the setup placements first.");
     robberPop(Number(t.dataset.hex), e.clientX, e.clientY);
   }
+}
+
+function piecePop(n, own, x, y) {
+  const [c, kind] = own, isCity = kind === "c";
+  const owners = S.order.filter((o) => o !== c).map((o) => `<button class="opt" data-act="owner" data-arg="${o}">${dotHtml(o)}${pname(o)}</button>`).join("");
+  openPop(`<h4>${dotHtml(c)} ${pname(c)}'s ${isCity ? "city" : "settlement"} · corner ${n}</h4>
+    <div class="menu">
+      ${isCity ? `<button data-act="down">Make it a settlement <span class="sub">no cards change hands</span></button>`
+        : `<button data-act="up">Upgrade to a city <span class="sub">pays 2 wheat + 3 ore</span></button>
+           <button data-act="upfree">Make it a city <span class="sub">free, no cards</span></button>`}
+      <button data-act="remove">Remove it</button>
+    </div>
+    <div class="lbl">Give it to</div><div class="row">${owners}</div>
+    <div class="sub">To take back a build together with its cards, delete it from the game log.</div>`, x, y,
+  (el) => onActs(el, {
+    up: () => send(`b ${c} c ${n}`), upfree: () => send(`piece ${n} ${c} city`), down: () => send(`piece ${n} ${c}`),
+    remove: () => send(`piece ${n} none`), owner: (o) => send(`piece ${n} ${o}${isCity ? " city" : ""}`),
+  }));
+}
+
+function roadPop(e, c, x, y) {
+  const [a, b] = S.topology.edges[e].nodes;
+  const owners = S.order.filter((o) => o !== c).map((o) => `<button class="opt" data-act="owner" data-arg="${o}">${dotHtml(o)}${pname(o)}</button>`).join("");
+  openPop(`<h4>${dotHtml(c)} ${pname(c)}'s road · edge ${e}</h4>
+    <div class="menu"><button data-act="remove">Remove it</button></div>
+    <div class="lbl">Give it to</div><div class="row">${owners}</div>
+    <div class="sub">To take back a build together with its cards, delete it from the game log.</div>`, x, y,
+  (el) => onActs(el, { remove: () => send(`piece ${a}-${b} none`), owner: (o) => send(`piece ${a}-${b} ${o}`) }));
+}
+
+function cardPop(c, r, x, y) {
+  const i = S.resources.indexOf(r);
+  const show = () => { const p = player(c); return p.exact ? String(Math.round(p.hand[i])) : p.hand[i].toFixed(1) + " (estimated)"; };
+  const go = async (cmd) => { const res = await send(cmd, true); if (res && res.ok) cardPop(c, r, x, y); };
+  openPop(`<h4>${dotHtml(c)} ${pname(c)} · <span class="swatch" style="background:${RES_COLOR[r]}"></span>${r}: ${show()}</h4>
+    <div class="row"><button class="opt" data-act="minus">− 1 ${r}</button><button class="opt" data-act="plus">+ 1 ${r}</button>
+      <span class="sub">cards move to / from the bank</span></div>
+    <div class="row"><button class="btn" data-act="hand">Edit whole hand and dev cards…</button><span class="spacer"></span><button class="btn" data-act="close">Done</button></div>`, x, y,
+  (el) => onActs(el, { minus: () => go(`l ${c} ${r}`), plus: () => go(`g ${c} ${r}`), hand: () => handPop(c, x, y), close: closePop }));
+}
+
+function playersPop(x, y) {
+  const rows = S.order.map((c) => ({ old: c, color: c, name: player(c).name || "" }));
+  const draw = () => openPop(`<h4>Players · colours, names and turn order</h4>
+    ${rows.map((r, i) => `<div class="row" data-row="${i}">
+        <span style="width:18px" class="sub">${i + 1}.</span>${dotHtml(r.color)}
+        <select data-colour="${i}">${S.palette.map((p) => `<option value="${p}" ${p === r.color ? "selected" : ""} ${rows.some((o, j) => j !== i && o.color === p) ? "disabled" : ""}>${p}</option>`).join("")}</select>
+        <input data-name="${i}" value="${esc(r.name)}" placeholder="name (optional)" maxlength="24" style="width:130px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel-2)">
+        <button class="opt" data-act="upr" data-arg="${i}" ${i === 0 ? "disabled" : ""} title="earlier in the turn order">▲</button>
+        <button class="opt" data-act="downr" data-arg="${i}" ${i === rows.length - 1 ? "disabled" : ""} title="later in the turn order">▼</button>
+      </div>`).join("")}
+    <div class="sub">Changing a colour updates every piece and every logged move. Names can be used in commands too.</div>
+    <div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="save">Save</button></div>`, x, y, (el) => {
+    el.querySelectorAll("[data-colour]").forEach((s2) => s2.addEventListener("change", () => { rows[+s2.dataset.colour].color = s2.value; sync(el); draw(); }));
+    onActs(el, {
+      upr: (i) => { sync(el); i = +i; [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); },
+      downr: (i) => { sync(el); i = +i; [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); },
+      close: closePop,
+      save: async () => {
+        sync(el);
+        const colors = Object.fromEntries(rows.map((r) => [r.old, r.color]));
+        const names = Object.fromEntries(rows.map((r) => [r.color, r.name]));
+        const res = await api("/api/players", { colors, names, order: rows.map((r) => r.color) });
+        if (!res.ok) return toast(res.error, 6000, true);
+        closePop(); showProblems(res); setState(res.state); toast("Players updated.");
+      },
+    });
+  });
+  const sync = (el) => el.querySelectorAll("[data-name]").forEach((inp) => { rows[+inp.dataset.name].name = inp.value; });
+  draw();
+}
+
+function showProblems(res) {
+  if (res.problems && res.problems.length) toast(res.problems.join(" · "), 9000, true);
+}
+
+async function logAction(kind, id) {
+  const res = await api(`/api/log/${kind}`, { id: Number(id) });
+  if (!res.ok) return toast(res.error, 6000, true);
+  setState(res.state);
+  if (res.problems && res.problems.length) showProblems(res); else toast(res.message);
 }
 
 function robberPop(h, x, y) {
@@ -737,21 +833,21 @@ function discardPop(c, n, x, y) {
 
 function handPop(c, x, y) {
   const p = player(c), vals = Object.fromEntries(resKeys().map((r, i) => [r, Math.round(p.hand[i])]));
-  const dev = { dev: p.dev, knights: p.knights }, count = { n: p.cards };
-  openPop(`<h4>${dotHtml(c)} ${cap(c)} · cards and dev cards</h4>
+  const dev = { dev: p.dev, knights: p.knights, vp: p.vp_cards }, count = { n: p.cards };
+  openPop(`<h4>${dotHtml(c)} ${pname(c)} · cards and dev cards</h4>
     <div class="lbl">Exact hand</div><div id="hx">${stepperHtml(resKeys(), vals, resLabels())}</div>
     <div class="foot"><button class="btn primary" data-act="exact">Set exact hand</button></div>
     <div class="lbl">Or just how many cards (types unknown)</div>
     <div class="row" id="cnt">${stepperHtml(["n"], count, ["cards"])}<button class="btn" data-act="count">Set count</button></div>
     <div class="lbl">Dev cards</div>
-    <div class="row" id="dv">${stepperHtml(["dev", "knights"], dev, ["unplayed", "knights played"])}<button class="btn" data-act="dev">Save</button></div>`, x, y, (el) => {
+    <div class="row" id="dv">${stepperHtml(["dev", "knights", "vp"], dev, ["unplayed", "knights played", "VP shown"])}<button class="btn" data-act="dev">Save</button></div>`, x, y, (el) => {
     bindSteppers(el.querySelector("#hx"), vals);
     bindSteppers(el.querySelector("#cnt"), count);
     bindSteppers(el.querySelector("#dv"), dev);
     onActs(el, {
       exact: () => send(`hand ${c} ${vecStr(resKeys().map((r) => vals[r]))}`),
       count: () => send(`hand ${c} ${count.n}`),
-      dev: () => send(`devs ${c} ${dev.dev} ${dev.knights}`),
+      dev: () => send(`devs ${c} ${dev.dev} ${dev.knights} ${dev.vp}`),
     });
   });
 }
@@ -794,14 +890,14 @@ function openMenuPop(x, y) {
 // ---------------------------------------------------------------- panels
 function renderStatus() {
   const cur = S.current, ph = S.phase;
-  const what = ph === "setup" ? `places a ${S.setup_next[1]}` : ph === "main" ? (S.last_roll ? "builds and trades" : "to roll")
+  const what = ph === "setup" ? `setup (any order)` : ph === "main" ? (S.last_roll ? "builds and trades" : "to roll")
     : ph === "discard" ? "· discards" : "· moves the robber";
   $("status").innerHTML = `
     <span class="chip">Turn <b>${S.turn}</b></span>
-    <span class="chip ${ph === "setup" ? "setup" : ph === "main" ? "" : "alert"}">${dotHtml(cur)}<b>${cap(cur)}</b>&nbsp;${what}</span>
+    <span class="chip ${ph === "setup" ? "setup" : ph === "main" ? "" : "alert"}">${dotHtml(cur)}<b>${pname(cur)}</b>&nbsp;${what}</span>
     ${S.last_roll && ph !== "setup" ? `<span class="chip">Rolled <b>${S.last_roll}</b></span>` : ""}`;
   const me = $("opt-me");
-  me.innerHTML = `<option value="">Me: pick your colour</option>` + S.order.map((c) => `<option value="${c}" ${S.perspective === c ? "selected" : ""}>Me: ${c}</option>`).join("");
+  me.innerHTML = `<option value="">Me: pick your colour</option>` + S.order.map((c) => `<option value="${c}" ${S.perspective === c ? "selected" : ""}>Me: ${player(c).name ? esc(player(c).name) + " (" + c + ")" : c}</option>`).join("");
   me.classList.toggle("needs", !S.perspective);
   $("btn-undo").disabled = !S.can_undo;
   $("btn-next").disabled = ph === "setup";
@@ -820,8 +916,8 @@ function renderBanner() {
       <span class="warns">Board check: ${S.board_warnings.length ? S.board_warnings.map(esc).join(" · ") : "looks like a standard board."}</span>`;
   } else if (S.phase === "setup") {
     cls = "setup";
-    const [c, kind] = S.setup_next;
-    html = `<span class="msg"><b>Setup</b> · ${dotHtml(c)} <b>${cap(c)}</b> places a ${kind}: click ${kind === "settlement" ? "an empty corner" : "an edge touching the new settlement"}. The numbered rings are the engine's picks. Second settlements collect their starting cards automatically.</span>`;
+    const a = actor || S.current, pend = player(a).pending_setup;
+    html = `<span class="msg"><b>Setup, in any order.</b> Placing for ${dotHtml(a)} <b>${pname(a)}</b>${pend ? `: next a ${pend}` : " (done)"}. Click a player row to place for someone else. Rings show the engine's picks for this player; second settlements collect their starting cards automatically.</span>`;
   } else if (S.phase === "discard") {
     cls = "alert";
     const picks = A && !isStale() ? A.moves.filter((m) => m.events[0] && m.events[0].type === "discard") : [];
@@ -847,7 +943,8 @@ function renderBanner() {
     pick: (c) => { const m = A.moves.find((mm) => mm.events[0] && mm.events[0].player === c && mm.events[0].type === "discard"); if (m) applyEvents(m.events, m.label); },
   });
   const a = actor || S.current;
-  $("hint").innerHTML = editMode ? "" : `Corner = settlement (your own settlement → city) · edge = road · tile = robber. Building for ${dotHtml(a)} <b>${cap(a)}</b> <span class="sub">(click a player row to switch)</span> · <kbd>?</kbd> help`;
+  $("hint").innerHTML = editMode ? "" : `Empty corner = settlement · empty edge = road · tile = robber · click any piece to change or remove it · click a card count to add/remove cards. Building for ${dotHtml(a)} <b>${pname(a)}</b>${actorPinned ? ` <button class="linkbtn" id="follow">follow the turn instead</button>` : ` <span class="sub">(click a player row to switch)</span>`} · <kbd>?</kbd> help`;
+  const fb = $("follow"); if (fb) fb.onclick = () => { actorPinned = false; actor = S.setup_next ? S.setup_next[0] : S.current; renderAll(); if (opt.live) analyze(); };
 }
 
 function renderDice() {
@@ -860,14 +957,14 @@ function renderPlayers() {
   const rows = S.players.map((p) => {
     const hand = S.resources.map((r, i) => {
       const v = p.hand[i], txt = p.exact ? String(Math.round(v)) : v.toFixed(1);
-      return `<span class="res ${v < 0.05 ? "zero" : ""}" style="background:${RES_COLOR[r]}" title="${r}">${txt}</span>`;
+      return `<span class="res click ${v < 0.05 ? "zero" : ""}" data-card="${p.color}|${r}" style="background:${RES_COLOR[r]}" title="${r}: click to add or remove">${txt}</span>`;
     }).join("");
     const tags = [p.longest_road ? `<span class="tag on">Longest road</span>` : "", p.largest_army ? `<span class="tag on">Largest army</span>` : "",
       ...p.ports.map((t) => `<span class="tag">${t === "3:1" ? "3:1" : "2:1 " + RES_SHORT[t]}</span>`)].join(" ");
     const score = fresh && A.scores ? A.scores[p.color] : null;
     return `<tr class="${p.color === S.current ? "turn" : ""} ${p.color === actor ? "actor" : ""}" data-actor="${p.color}">
-      <td><div class="pname">${dotHtml(p.color)}${p.color}${S.perspective === p.color ? ' <span class="tag">me</span>' : ""}</div>
-          <div class="sub">${p.settlements.length}S ${p.cities.length}C ${p.roads.length}R · road ${p.road_length} · K${p.knights} · dev ${p.dev}</div></td>
+      <td><div class="pname">${dotHtml(p.color)}${p.name ? `${esc(p.name)} <span class="sub">${p.color}</span>` : cap(p.color)}${S.perspective === p.color ? ' <span class="tag">me</span>' : ""}</div>
+          <div class="sub">${p.settlements.length}S ${p.cities.length}C ${p.roads.length}R · road ${p.road_length} · K${p.knights} · dev ${p.dev}${p.vp_cards ? ` · VP card ${p.vp_cards}` : ""}</div></td>
       <td class="vp" title="victory points${p.hidden_vp >= 0.1 ? " (+ likely hidden VP cards)" : ""}">${p.vp}${p.hidden_vp >= 0.1 ? `<span class="sub">+${p.hidden_vp}</span>` : ""}</td>
       <td><div class="hand">${hand}</div><div class="sub">${p.cards} cards${p.exact ? "" : " · estimated"}${score != null ? ` · eval ${score}` : ""}</div><div>${tags}</div></td>
       <td><button class="edit-btn" data-hand="${p.color}" title="Set ${p.color}'s cards and dev cards">✎</button></td>
@@ -878,9 +975,12 @@ function renderPlayers() {
 }
 
 function renderFeed() {
+  const moves = (f) => f.kind === "command" || f.kind === "apply";
   $("feed").innerHTML = S.feed.slice().reverse().map((f) =>
-    `<li class="${f.ok ? "" : "err"}"><span class="n">T${f.turn}</span><div><code>${esc(f.line)}</code><div class="m">${esc(f.message)}</div></div></li>`).join("")
-    || `<li><span class="n"></span><div class="m">Moves appear here. Press <kbd>?</kbd> for a quick tour.</div></li>`;
+    `<li class="${f.ok ? "" : "err"}"><span class="n">T${f.turn}</span><div><code>${esc(f.line)}</code><div class="m">${esc(f.message || "")}</div>
+      <div class="acts"><button data-del="${f.id}" title="${moves(f) ? "Delete just this move; the rest of the game is replayed without it" : "Remove this line"}">✕ delete</button>
+      ${moves(f) ? `<button data-rewind="${f.id}" title="Go back to just before this move (it and everything after is removed)">↶ back to here</button>` : ""}</div></div></li>`).join("")
+    || `<li><span class="n"></span><div class="m">Moves appear here. Each one can be deleted or rewound. Press <kbd>?</kbd> for a quick tour.</div></li>`;
 }
 
 function renderEngine() {
@@ -891,7 +991,7 @@ function renderEngine() {
   if (!A) { bd.innerHTML = `<div class="sub">${opt.live ? "Starting the engine…" : `<button class="btn primary" data-act="analyze">Analyse position</button>`}</div>`; onActs(bd, { analyze }); return; }
   const best = A.moves[0], setup = A.phase === "setup";
   const winTxt = setup ? "Setup" : A.prelim ? "~" + pct(A.win) : pct(A.win);
-  const col = PLAYER[A.player] === "#f4f4f0" ? "var(--fg)" : PLAYER[A.player];
+  const col = inkOf(A.player);
   const lines = A.moves.map((m, i) => `
     <li>
       <span class="rank" style="background:${RANK[i] || RANK[4]}">${i + 1}</span>
@@ -902,7 +1002,7 @@ function renderEngine() {
   bd.innerHTML = `<div style="${stale ? "opacity:.5" : ""}">
       <div class="verdict">
         <div class="big" style="color:${col}">${winTxt}</div>
-        <div class="who">${setup ? `placement advice for <b>${cap(A.player)}</b>` : `win chance for <b>${cap(A.player)}</b>`}<br>position score ${A.position_score}</div>
+        <div class="who">${setup ? `placement advice for <b>${pname(A.player)}</b>` : `win chance for <b>${pname(A.player)}</b>`}<br>position score ${A.position_score}</div>
         ${best ? `<div class="best">Best: ${esc(best.label)}</div>` : ""}
       </div>
       <ol class="lines">${lines}</ol>
@@ -911,7 +1011,15 @@ function renderEngine() {
       ${A.notes.map((n) => `<div class="notes">${esc(n)}</div>`).join("")}
       ${opt.live ? "" : `<div style="margin-top:10px"><button class="btn" data-act="analyze">Analyse again</button></div>`}
     </div>`;
-  onActs(bd, { analyze, play: (i, b) => { const [x, y] = anchorOf(b); playMove(A.moves[Number(i)], x - 220, y); } });
+  onActs(bd, { analyze, play: (i, b) => {
+    if (!b.classList.contains("armed")) {           // nothing is applied without a second click
+      bd.querySelectorAll(".play.armed").forEach((o) => { o.classList.remove("armed"); o.textContent = "▶ play"; });
+      b.classList.add("armed"); b.textContent = "Apply?";
+      setTimeout(() => { if (b.isConnected) { b.classList.remove("armed"); b.textContent = "▶ play"; } }, 4000);
+      return;
+    }
+    const [x, y] = anchorOf(b); playMove(A.moves[Number(i)], x - 220, y);
+  } });
 }
 
 function renderEval() {
@@ -942,16 +1050,23 @@ document.addEventListener("mousedown", (e) => {
 });
 $("dice").addEventListener("click", (e) => { const b = e.target.closest("[data-roll]"); if (b && !b.disabled) send(`d ${b.dataset.roll}`); });
 $("btn-next").addEventListener("click", () => { freeRoads = 0; send("n"); });
-$("btn-undo").addEventListener("click", async () => { const r = await api("/api/undo", {}); if (r.ok) { toast(r.message); setState(r.state); } });
+$("btn-undo").addEventListener("click", async () => { const r = await api("/api/undo", {}); if (r.ok) { toast(r.message); setState(r.state); showProblems(r); } });
 $("btn-edit").addEventListener("click", () => setEdit(!editMode));
-for (const [id, fn] of [["btn-trade", tradePop], ["btn-dev", devPop], ["btn-new", newGamePop], ["btn-open", openMenuPop]]) {
+for (const [id, fn] of [["btn-trade", tradePop], ["btn-dev", devPop], ["btn-new", newGamePop], ["btn-open", openMenuPop], ["btn-players", playersPop]]) {
   $(id).dataset.pop = "1";
   $(id).addEventListener("click", (e) => { if (!S) return; const [x, y] = anchorOf(e.currentTarget); fn(x, y); });
 }
 $("btn-help").addEventListener("click", () => $("help").showModal());
+$("feed").addEventListener("click", (e) => {
+  const d = e.target.closest("[data-del]"), r = e.target.closest("[data-rewind]");
+  if (d) logAction("delete", d.dataset.del);
+  if (r) logAction("rewind", r.dataset.rewind);
+});
 $("help-close").addEventListener("click", () => $("help").close());
 $("cmdform").addEventListener("submit", (e) => { e.preventDefault(); const v = $("cmd").value.trim(); if (v) { send(v); $("cmd").value = ""; } });
 $("players").addEventListener("click", (e) => {
+  const cb = e.target.closest("[data-card]");
+  if (cb) { const [c, r] = cb.dataset.card.split("|"); const [x, y] = anchorOf(cb); return cardPop(c, r, x - 120, y); }
   const hb = e.target.closest("[data-hand]");
   if (hb) { const [x, y] = anchorOf(hb); return handPop(hb.dataset.hand, x - 320, y); }
   const tr = e.target.closest("tr[data-actor]"); if (!tr) return;

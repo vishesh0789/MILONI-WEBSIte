@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import threading
 import time
 import traceback
@@ -67,23 +68,145 @@ def autosave_info(path: Path = AUTOSAVE) -> dict[str, Any] | None:
         return None
 
 
+PLAYER_PALETTE = ("red", "blue", "orange", "white", "black", "green", "purple", "brown", "pink", "gray")
+REPLAYED = ("command", "apply")
+
+
+def _recolor(obj: Any, mapping: dict[str, str]) -> Any:
+    """Rename player colours inside nested event data (values and dict keys)."""
+    if isinstance(obj, dict):
+        return {mapping.get(k, k): _recolor(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_recolor(v, mapping) for v in obj]
+    if isinstance(obj, str):
+        return mapping.get(obj, obj)
+    return obj
+
+
+def _recolor_line(line: str, mapping: dict[str, str]) -> str:
+    pattern = re.compile(r"(?<![\w#])(#?)(" + "|".join(map(re.escape, mapping)) + r")(?!\w)")
+    return pattern.sub(lambda m: m.group(1) + mapping[m.group(2)], line)
+
+
 class Session:
-    """One game shared by the page; a lock serialises mutations."""
+    """One game shared by the page; a lock serialises mutations.
+
+    The game is ``base`` (its starting position) plus a list of logged actions.
+    Deleting or rewinding log entries rebuilds the game by replaying the rest.
+    """
 
     def __init__(self, game: GameState, autosave_path: Path | None = AUTOSAVE):
         self.lock = threading.Lock()
-        self.game = game
-        self.feed: list[dict[str, Any]] = []
         self.autosave_path = autosave_path
         self.generation = 0          # bumped by every analysis request (cancels older ones)
         self.version = 0             # bumped by every state change
+        self._next_id = 1
+        self.start(game)
 
-    # -- bookkeeping ------------------------------------------------------------
-    def record(self, line: str, message: str, ok: bool = True) -> None:
-        self.feed.append({"turn": self.game.turn_number, "player": self.game.current_color,
-                          "line": line, "message": message, "ok": ok})
-        self.feed = self.feed[-200:]
+    # -- the log ------------------------------------------------------------------
+    def start(self, game: GameState, actions: list[dict[str, Any]] | None = None) -> list[str]:
+        """Begin from ``game``; optionally replay saved actions on top. Returns replay problems."""
+        self.base = game.to_dict()
+        self.game = game
+        self.actions: list[dict[str, Any]] = []
+        return self._replay(list(actions or [])) if actions else []
 
+    @property
+    def feed(self) -> list[dict[str, Any]]:
+        return self.actions
+
+    def _entry(self, kind: str, **kw: Any) -> dict[str, Any]:
+        entry = {"id": self._next_id, "kind": kind, "turn": self.game.turn_number,
+                 "player": self.game.current_color, **kw}
+        self._next_id += 1
+        return entry
+
+    def note(self, line: str, message: str, ok: bool = True) -> None:
+        """A log line that is not a move (errors, 'new game')."""
+        self.actions.append(self._entry("info" if ok else "error", line=line, message=message, ok=ok))
+        self.actions = self.actions[-400:]
+
+    def run_command(self, line: str) -> str:
+        entry = self._entry("command", line=line)
+        msg = self.game.execute(line)
+        entry.update(message=msg, ok=True)
+        self.actions.append(entry)
+        return msg
+
+    def run_events(self, events: list[dict[str, Any]], label: str) -> str:
+        entry = self._entry("apply", line=label, events=events)
+        msg = self.game.apply_events(events) if events else "no action"
+        entry.update(message=msg, ok=True)
+        self.actions.append(entry)
+        return msg
+
+    def _replay(self, actions: list[dict[str, Any]]) -> list[str]:
+        """Rebuild the game from ``base`` + ``actions``; moves that no longer apply are dropped."""
+        self.game = GameState.from_dict(self.base)
+        self.actions, problems = [], []
+        for a in actions:
+            if a.get("kind") not in REPLAYED:
+                self.actions.append(a)
+                continue
+            a = dict(a, turn=self.game.turn_number, player=self.game.current_color)
+            try:
+                if a["kind"] == "command":
+                    a["message"] = self.game.execute(a["line"])
+                else:
+                    a["message"] = self.game.apply_events(a["events"]) if a.get("events") else "no action"
+                self.actions.append(a)
+                if "assuming missed income" in a["message"]:
+                    problems.append(f"'{a.get('line')}' now needs cards nobody received - assumed missed income")
+            except USER_ERRORS as exc:
+                problems.append(f"dropped '{a.get('line')}': {str(exc).strip(chr(39) + chr(34))}")
+        self._next_id = max([self._next_id] + [int(a.get("id", 0)) + 1 for a in self.actions])
+        return problems
+
+    def delete(self, entry_id: int) -> list[str]:
+        if not any(a["id"] == entry_id for a in self.actions):
+            raise ValueError("that log entry no longer exists")
+        return self._replay([a for a in self.actions if a["id"] != entry_id])
+
+    def rewind(self, entry_id: int) -> list[str]:
+        """Go back to just before ``entry_id`` (it and everything after are removed)."""
+        ids = [a["id"] for a in self.actions]
+        if entry_id not in ids:
+            raise ValueError("that log entry no longer exists")
+        return self._replay(self.actions[:ids.index(entry_id)])
+
+    def undo(self) -> str:
+        for a in reversed(self.actions):
+            if a["kind"] in REPLAYED:
+                self.delete(a["id"])
+                return f"undid '{a.get('line')}'"
+        return "nothing to undo"
+
+    def recolor(self, mapping: dict[str, str]) -> list[str]:
+        """Change player colours everywhere: starting position and every logged move."""
+        mapping = {old: new for old, new in mapping.items() if old != new}
+        if not mapping:
+            return []
+        current = list(self.game.order)
+        final = [mapping.get(c, c) for c in current]
+        bad = [c for c in final if c not in PLAYER_PALETTE]
+        if bad or len(set(final)) != len(final):
+            raise ValueError(f"each player needs a different colour from: {', '.join(PLAYER_PALETTE)}")
+        base = _recolor(self.base, mapping)
+        base["players"] = [dict(p, color=mapping.get(p["color"], p["color"])) for p in self.base.get("players", [])]
+        if not base["players"]:
+            base["players"] = [{"color": c} for c in base.get("turn_order") or final]
+        self.base = base
+        actions = []
+        for a in self.actions:
+            a = dict(a)
+            if a.get("line"):
+                a["line"] = _recolor_line(a["line"], mapping)
+            if a.get("events"):
+                a["events"] = _recolor(a["events"], mapping)
+            actions.append(a)
+        return self._replay(actions)
+
+    # -- persistence ------------------------------------------------------------------
     def changed(self) -> None:
         self.version += 1
         if self.autosave_path is None:
@@ -91,7 +214,7 @@ class Session:
         try:
             data = self.game.to_dict()
             data["saved_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-            data["gui_feed"] = self.feed[-80:]
+            data["gui"] = {"base": self.base, "actions": self.actions[-400:]}
             self.autosave_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.autosave_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(_jsonable(data)))
@@ -99,12 +222,21 @@ class Session:
         except OSError:
             pass  # autosave is best effort
 
+    def restore(self, data: dict[str, Any]) -> list[str]:
+        """Load a saved game; autosaves carry their log so it stays editable."""
+        gui = data.get("gui")
+        if gui and gui.get("base"):
+            return self.start(GameState.from_dict(gui["base"]), gui.get("actions"))
+        self.start(GameState.from_dict(data))
+        for f in data.get("gui_feed") or []:          # older autosaves: read-only history
+            self.note(f.get("line", ""), f.get("message", ""), f.get("ok", True))
+        return []
+
     @property
     def previous_path(self) -> Path | None:
         return self.autosave_path.with_name(PREVIOUS_NAME) if self.autosave_path else None
 
-    def replace_game(self, game: GameState, feed: list[dict[str, Any]] | None = None,
-                     keep_previous: bool = True) -> None:
+    def replace_game(self, game: GameState, keep_previous: bool = True, data: dict[str, Any] | None = None) -> list[str]:
         """Switch games; the outgoing autosaved game is kept as the 'previous game'."""
         if keep_previous and self.autosave_path is not None and self.autosave_path.exists():
             try:
@@ -112,9 +244,11 @@ class Session:
             except OSError:
                 pass
         perspective = self.game.perspective
-        self.game = game
-        self.game.perspective = self.game.perspective or perspective
-        self.feed = list(feed or [])
+        problems = self.restore(data) if data is not None else self.start(game)
+        if not self.game.perspective and perspective in self.game.order:
+            self.game.perspective = perspective
+            self.base["perspective"] = perspective
+        return problems
 
     # -- serialisation ------------------------------------------------------------
     def state(self) -> dict[str, Any]:
@@ -125,7 +259,8 @@ class Session:
             p = g.players[c]
             i = g.idx(c)
             players.append({
-                "color": c,
+                "color": c, "name": g.names.get(c, ""), "pending_setup": g.pending_setup(c) if g.phase == "setup" else None,
+                "vp_cards": p.vp_cards,
                 "settlements": sorted(p.settlements), "cities": sorted(p.cities), "roads": sorted(p.roads),
                 "vp": g.public_vp(c), "hidden_vp": round(g.expected_hidden_vp(c), 2),
                 "cards": g.hand_total(c), "hand": [round(x, 2) for x in g.belief.expected(i)],
@@ -155,7 +290,8 @@ class Session:
             "last_roll": g.last_roll, "perspective": g.perspective, "setup_next": nxt,
             "pending_discards": g.pending_discards, "bank": g.bank, "dev_deck": g.dev_deck,
             "players": players, "resources": [r.value for r in RESOURCES],
-            "can_undo": bool(g._history), "feed": self.feed[-80:], "version": self.version,
+            "can_undo": any(a["kind"] in REPLAYED for a in self.actions), "feed": self.actions[-150:],
+            "version": self.version, "palette": PLAYER_PALETTE,
             "board_warnings": g.board_warnings(),
             # before the first move, autosave.json still holds the last session's game
             "autosave": autosave_info(self.autosave_path) if self.autosave_path and self.version == 0 else None,
@@ -256,59 +392,66 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
 
         def _route(self, raw: bytes) -> dict[str, Any]:
             g = session.game
+            req = json.loads(raw or b"{}") if self.path != "/api/extract" else {}
+
+            def done(msg: str, problems: list[str] | None = None) -> dict[str, Any]:
+                session.changed()
+                return {"ok": True, "message": msg, "problems": problems or [], "state": session.state()}
+
             if self.path == "/api/command":
-                line = json.loads(raw)["line"].strip()
+                line = req["line"].strip()
                 if line in ("u", "undo"):
-                    msg = "undone" if g.undo() else "nothing to undo"
-                else:
-                    try:
-                        msg = g.execute(line)
-                    except USER_ERRORS as exc:
-                        session.record(line, str(exc).strip("'\""), ok=False)
-                        raise
-                if line.split()[:1] not in (["s"], ["show"], ["help"], ["h"], ["?"]):
-                    session.record(line, msg)
-                    session.changed()
-                return {"ok": True, "message": msg, "state": session.state()}
+                    return done(session.undo())
+                if line.split()[:1] in (["s"], ["show"], ["help"], ["h"], ["?"]):
+                    return {"ok": True, "message": g.execute(line), "state": session.state()}
+                try:
+                    msg = session.run_command(line)
+                except USER_ERRORS as exc:
+                    session.note(line, str(exc).strip("'\""), ok=False)
+                    raise
+                return done(msg)
             if self.path == "/api/apply":
-                req = json.loads(raw)
-                events, label = req["events"], req.get("label", "engine move")
-                msg = g.apply_events(events) if events else "no action"
-                session.record(label, msg)
-                session.changed()
-                return {"ok": True, "message": msg, "state": session.state()}
+                return done(session.run_events(req["events"], req.get("label", "engine move")))
             if self.path == "/api/undo":
-                msg = "undone" if g.undo() else "nothing to undo"
-                session.record("undo", msg)
-                session.changed()
-                return {"ok": True, "message": msg, "state": session.state()}
+                return done(session.undo())
+            if self.path == "/api/log/delete":
+                problems = session.delete(int(req["id"]))
+                return done("log entry deleted" + (f"; {len(problems)} later move(s) no longer fit" if problems else ""), problems)
+            if self.path == "/api/log/rewind":
+                problems = session.rewind(int(req["id"]))
+                return done("rewound the game", problems)
+            if self.path == "/api/players":
+                problems = session.recolor({k: str(v).lower() for k, v in (req.get("colors") or {}).items()})
+                for color, name in (req.get("names") or {}).items():
+                    if session.game.names.get(color, "") != (name or "").strip():
+                        session.run_command(f"name #{color} {name}".rstrip())
+                if req.get("order") and list(req["order"]) != session.game.order:
+                    session.run_command("order " + " ".join("#" + c for c in req["order"]))
+                return done("players updated", problems)
             if self.path == "/api/load":
-                session.replace_game(GameState.from_dict(json.loads(raw)))
-                session.record("load", "game loaded")
-                session.changed()
-                return {"ok": True, "state": session.state()}
+                problems = session.replace_game(None, data=req)  # type: ignore[arg-type]
+                session.note("load", "game loaded")
+                return done("game loaded", problems)
             if self.path == "/api/new":
-                kind = json.loads(raw or b"{}").get("kind", "example")
-                feed = None
+                kind = req.get("kind", "example")
                 if kind in ("resume", "previous"):
                     path = session.autosave_path if kind == "resume" else session.previous_path
                     if not path or not path.exists():
                         raise ValueError("there is no saved game to go back to yet")
                     data = json.loads(path.read_text())
-                    feed = data.get("gui_feed")
-                    msg = f"resumed the game saved {data.get('saved_at', '')}"
-                elif kind == "random":
-                    data, msg = random_board_dict(), "random board - setup: red places the first settlement"
+                    problems = session.replace_game(None, keep_previous=kind != "resume", data=data)  # type: ignore[arg-type]
+                    return done(f"resumed the game saved {data.get('saved_at', '')}", problems)
+                if kind == "random":
+                    data, msg = random_board_dict(), "random board - setup: place settlements and roads in any order"
                 elif kind == "blank":
                     data = json.loads(EXAMPLE.read_text())
                     data["players"], data["hands"] = [], None
-                    msg = "example board without pieces - setup: red places the first settlement"
+                    msg = "example board without pieces - setup: place settlements and roads in any order"
                 else:
                     data, msg = json.loads(EXAMPLE.read_text()), "example game loaded"
-                session.replace_game(GameState.from_dict(data), feed, keep_previous=kind != "resume")
-                session.record("new game", msg)
-                session.changed()
-                return {"ok": True, "message": msg, "state": session.state()}
+                session.replace_game(GameState.from_dict(data))
+                session.note("new game", msg)
+                return done(msg)
             if self.path == "/api/extract":
                 try:
                     import cv2
@@ -320,9 +463,10 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
                 img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 if img is None:
                     raise ValueError("could not open that image - use a PNG or JPEG screenshot")
-                res = BoardVisionExtractor().extract(img)
+                res = BoardVisionExtractor().extract(img, turn_order=list(g.order))
+                res.data["names"] = dict(g.names)
                 session.replace_game(GameState.from_dict(res.data))
-                session.record("read screenshot", "board read from screenshot - check it with Edit board")
+                session.note("read screenshot", "board read from screenshot - check it with Edit board")
                 session.changed()
                 return {"ok": True, "warnings": res.warnings, "state": session.state()}
             raise KeyError(f"unknown endpoint {self.path}")
@@ -349,16 +493,16 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--resume", action="store_true", help=f"continue the autosaved game ({AUTOSAVE})")
     ap.add_argument("--no-browser", action="store_true")
     ns = ap.parse_args(argv)
-    feed = None
-    if ns.resume and AUTOSAVE.exists():
-        data = json.loads(AUTOSAVE.read_text())
-        game, feed = GameState.from_dict(data), data.get("gui_feed")
-    else:
-        game = GameState.load(ns.state or EXAMPLE)
+    game = GameState.load(ns.state or EXAMPLE)
     if ns.me:
         game.perspective = game.resolve_player(ns.me)
     session = Session(game)
-    session.feed = list(feed or [])
+    if ns.resume and AUTOSAVE.exists():
+        problems = session.restore(json.loads(AUTOSAVE.read_text()))
+        for p in problems:
+            print("note:", p)
+        if ns.me:
+            session.game.perspective = session.game.resolve_player(ns.me)
     server, port = serve(session, ns.port)
     url = f"http://127.0.0.1:{port}/"
     print(f"Catan analysis board: {url}")

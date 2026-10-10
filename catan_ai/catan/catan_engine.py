@@ -574,6 +574,9 @@ class CatanEngine:
         notes: list[str] = []
         if g.phase == "setup":
             nxt = g.setup_next()
+            own = g.pending_setup(color) if color else None
+            if own:                       # any order: advise the player you selected
+                nxt = (color, own)
             if nxt:
                 color, kind = nxt
                 moves = self._setup_moves(color, kind)
