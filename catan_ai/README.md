@@ -40,7 +40,7 @@ once). Other ways to run it:
 python -m catan.gui_server --me red      # the analysis board (what start.command runs)
 python -m catan.state_manager board.json --me red   # keyboard-only tracker in the terminal
 python run_demo.py [--vision]            # scripted demo: d 6, d 8, d 7 and AI advice
-python -m pytest                         # 37 tests
+python -m pytest                         # 44 tests
 ```
 
 ## Analysis board GUI
@@ -135,32 +135,60 @@ on the screenshot. It's the quickest way to look up an id mid-game.
 
 ## Module 1: Vision (`vision_extractor.py`)
 
-1. **Localisation.** Pixels near any terrain prototype (LAB distance) form a land mask. The largest
-   blob is hole-filled, which drops port discs and fills tokens and pieces. Its bounding box seeds
-   the centre and size (`width = 5√3·size`, `height = 8·size`). A coordinate-descent search then
-   maximises the IoU between the mask and the predicted 19-hex polygon.
-2. **Terrain.** Each hex is classified from the median LAB colour of an annulus that skips the token
-   and the borders, using the nearest prototype. If the counts break the base-game composition
-   (4/3/4/4/3/1), a quota-constrained assignment re-labels the least confident hexes.
-3. **Numbers.** OCR runs if one is installed (easyocr, then pytesseract). Otherwise digits are
-   segmented by connected components and correlated against rendered digit templates. Two priors
-   help: the pip-dot count (used only when the dots are cleanly separated) and red ink (6/8). A
-   second quota assignment enforces the token distribution.
-4. **Ports.** Each of the 30 coastal edges is probed just outside the coast. The 9 strongest
-   non-water probes that share no nodes are classified as 3:1 or a 2:1 resource port.
-5. **Pieces.** Settlements and cities are colour blobs at node pixels; a city is a noticeably
-   larger blob. Roads are colour matches along the middle third of each edge, and the robber is a
-   dark blob inside a hex.
-6. **Output.** Schema JSON with per-hex confidence. `Board.validate` warnings go in `meta.warnings`.
+1. **White balance.** Colonist's token faces and sails are pure white. The brightest near-neutral
+   pixels show what white looks like in this capture, and each colour channel is scaled back. This
+   undoes dim captures, photos of a screen and colour casts.
+2. **Localisation.**
+   * Pixels near any terrain colour form a land mask, and the largest blob is hole-filled.
+   * Its bounding box seeds the board centre and size (`width = 5√3·size`, `height = 8·size`).
+   * A coordinate-descent search then maximises the IoU with the predicted 19-hex polygon.
+3. **Terrain.** Each tile's median colour is matched against reference colours for both Colonist's
+   illustrated tiles and flat classic art. A quota step enforces the 4/3/4/4/3/1 composition.
+4. **Numbers.** The token is found as the white, filled, roughly square blob in each tile. Colonist
+   puts it in the lower half, under the terrain picture. The number is then read from cues that
+   don't depend on the font:
+   * **pip dots** (2/12, 3/11, 4/10, 5/9, 6/8 pairs)
+   * **digit count**
+   * **enclosed holes** (5 has none, 9 and 6 one, 8 two), with ink picked by Otsu per token
+   * **red ink** for 6/8
 
-Captures with a hex radius under 48 px are upscaled automatically. Against synthetic Colonist-style
-renders (`render_synthetic_board`), the extractor recovers every tile, number, port, robber,
-settlement, city and road exactly for hex radii from 36 to 128 px; the tests cover 40, 64 and 96.
-**Real Colonist themes differ.** Call `VisionConfig().calibrate(screenshot, known_board_json)` once
-on a labelled screenshot to re-fit the terrain colours. If localisation fails, pass `--size` and
-`--center`. A screenshot can't show placement order or whose turn it is, so set
-`settlements[1]` (the second settlement, which grants setup income), `current_player` and
-`perspective` yourself if they matter.
+   Font templates (or OCR, if installed) only break ties, and a quota step enforces the base-game
+   token set.
+5. **Ports.**
+   * Colonist ports are white ship sails in the water.
+   * Each sail is tied to a coastal edge by its position along the edge's outward normal, plus
+     the wooden piers that join the ship to its two corners.
+   * The sail icon ("?", tree, bricks, sheep, wheat, rocks) is matched against reference masks in
+     `catan/assets/port_icons.npz`, enforcing four 3:1 ports and one of each 2:1.
+   * If no sails are found (classic art), it falls back to colour probes.
+6. **Robber.** Colonist's grey statue is found as a compact pale-grey blob on any non-mountain
+   tile; classic art uses a dark figure. If neither is found, the robber goes on the desert with a
+   warning, which also covers a robber on a mountain, where the grey rock art hides the statue.
+7. **Pieces.**
+   * Buildings are compact player-coloured blobs at corners. A city is noticeably larger, and tile
+     art of a similar colour is rejected because it also fills the wider area around the corner.
+   * Roads must cover a bar across the edge line, which rejects the one-sided shading Colonist
+     draws along hills tiles.
+
+**Measured on a real Colonist mobile screenshot** (`tests/fixtures/colonist_mobile_board.jpg`,
+board crop only):
+
+| Variant | Result |
+|---|---|
+| Original; 0.6×–2.2× scale; JPEG quality 20–60; board-only crop; wide desktop-style canvas; 25–40% darker; warm or cool tint; slight blur | 19/19 tiles, 9/9 ports (type and corners), robber correct, no phantom pieces |
+| Very small capture (hex radius ~28 px) | 17/19 tiles, 9/9 ports |
+| Overexposed (+15%, whites clipped) | 16/19 tiles, 9/9 ports |
+| Smaller than ~25 px per hex | Not readable; take a bigger screenshot |
+
+Still unverified on real Colonist images:
+* **Pieces.** The test screenshot is from setup, so there are no pieces on it yet. Piece colours
+  are estimates; an orange player on wheat fields is the case most likely to need calibration.
+  Colonist also has colours other than red, blue, orange and white (for example black).
+* **Robber on mountains.** It can't be detected there; the app warns and you fix it in Edit board.
+
+A screenshot can't show placement order or whose turn it is, so the board opens in **Edit board**
+mode for a quick check. `VisionConfig().calibrate(screenshot, known_board_json)` re-fits the
+terrain colours for an unusual theme.
 
 ## Module 2: State tracking (`state_manager.py`)
 
@@ -252,8 +280,8 @@ rolling, or a knight first.
 
 * Before the roll the only advice is to roll (or play a knight first). In Catan you can't build
   before rolling.
-* Vision has only been tested on synthetic renders. Real screenshots need the one-off
-  `calibrate` step, and OCR is recommended for non-Hershey fonts.
+* Vision is verified on one real Colonist board (plus synthetic renders). Piece detection has not
+  been tested on real Colonist pieces yet; see the vision section.
 * The rollout policy is greedy and simplified: no player-to-player trades, and a basic
   monopoly/YOP policy. Win % is a strength signal between moves, not a calibrated probability.
 * Rule enforcement is advisory. For example, the tracker doesn't stop a dev card being played on

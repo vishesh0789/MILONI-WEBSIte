@@ -63,13 +63,15 @@ def _cv():
 
 @dataclass
 class VisionConfig:
+    # Flat "classic" art first (the synthetic renderer draws with [0]); the last entry per
+    # terrain is Colonist.io's illustrated tile art, sampled from a real game.
     terrain_rgb: dict[Terrain, list[RGB]] = field(default_factory=lambda: {
-        Terrain.FOREST: [(36, 112, 52), (52, 128, 60)],
-        Terrain.HILLS: [(186, 88, 48), (170, 80, 50)],
-        Terrain.PASTURE: [(146, 204, 84), (128, 190, 72)],
-        Terrain.FIELDS: [(236, 192, 58), (226, 178, 50)],
-        Terrain.MOUNTAINS: [(122, 132, 140), (140, 148, 156)],
-        Terrain.DESERT: [(222, 204, 152), (210, 192, 140)],
+        Terrain.FOREST: [(36, 112, 52), (52, 128, 60), (36, 148, 60)],
+        Terrain.HILLS: [(186, 88, 48), (170, 80, 50), (222, 110, 49)],
+        Terrain.PASTURE: [(146, 204, 84), (128, 190, 72), (150, 181, 21)],
+        Terrain.FIELDS: [(236, 192, 58), (226, 178, 50), (230, 183, 37)],
+        Terrain.MOUNTAINS: [(122, 132, 140), (140, 148, 156), (162, 166, 161)],
+        Terrain.DESERT: [(222, 204, 152), (210, 192, 140), (202, 192, 131)],
     })
     water_rgb: RGB = (48, 128, 196)
     token_rgb: RGB = (246, 232, 200)
@@ -296,7 +298,7 @@ class BoardVisionExtractor:
     # -- entry point ---------------------------------------------------------
     def extract(self, image: Any, *, turn_order: Sequence[str] = PLAYER_COLORS,
                 detect_pieces: bool = True) -> ExtractionResult:
-        img = self._load(image)
+        img = self._white_balance(self._load(image))
         lab = _to_lab(img)
         geom = self.locate_board(img, lab)
         warnings: list[str] = []
@@ -313,7 +315,9 @@ class BoardVisionExtractor:
         terrains, t_conf = self.classify_tiles(img, lab, geom)
         numbers, n_conf = self.read_numbers(img, geom, terrains)
         ports = self.detect_ports(img, lab, geom)
-        robber = self.detect_robber(img, geom, terrains)
+        robber, robber_sure = self._find_robber(img, geom, terrains)
+        if not robber_sure:
+            warnings.append("robber not found (it may be on a mountain tile) - placed on the desert, please check it")
         players: dict[str, dict[str, list[int]]] = {c: {"settlements": [], "cities": [], "roads": []}
                                                     for c in turn_order}
         if detect_pieces:
@@ -357,6 +361,30 @@ class BoardVisionExtractor:
         if self._digits is None:
             self._digits = _DigitReader(self.cfg.ocr)
         return self._digits
+
+    @staticmethod
+    def _white_balance(img: Any) -> Any:
+        """Undo global brightness / colour casts using the board's white elements.
+
+        Colonist's number tokens and port sails are pure white.  The brightest
+        near-neutral pixels estimate what white looks like in this capture; each channel
+        is scaled so it maps back to white.  Images that already look right are untouched.
+        """
+        cv2, np = _cv()
+        px = img.reshape(-1, 3).astype(np.float32)
+        spread = px.max(axis=1) - px.min(axis=1)
+        bright = px.sum(axis=1)
+        cand = px[(spread < 0.22 * px.max(axis=1) + 8) & (bright > np.percentile(bright, 60))]
+        if len(cand) < 200:
+            return img
+        top = cand[cand.sum(axis=1) >= np.percentile(cand.sum(axis=1), 97)]
+        white = np.median(top, axis=0)
+        if white.min() < 120:                       # no trustworthy white in the picture
+            return img
+        gain = np.clip(250.0 / np.maximum(white, 1.0), 0.8, 1.6)
+        if np.all(np.abs(gain - 1.0) < 0.04):
+            return img
+        return np.clip(img.astype(np.float32) * gain, 0, 255).astype(np.uint8)
 
     @staticmethod
     def _load(image: Any) -> Any:
@@ -511,17 +539,125 @@ class BoardVisionExtractor:
             scores[n] += 0.25 if (n in (6, 8)) == is_red else -0.25
         return scores, ocr_val
 
+    def _locate_token(self, img: Any, geom: BoardGeometry, h: int) -> tuple[Any, Any] | None:
+        """Find the number token inside hex ``h``: a filled, near-white, roughly square blob.
+
+        Colonist draws the token in the lower half of the tile (the terrain picture sits
+        above it); classic renders put it in the centre.  Returns (crop, mask) or None.
+        """
+        cv2, np = _cv()
+        s = geom.size
+        cx, cy = geom.hex_px(self.topo, h)
+        x0, x1 = int(max(0, cx - 0.62 * s)), int(min(img.shape[1], cx + 0.62 * s))
+        y0, y1 = int(max(0, cy - 0.7 * s)), int(min(img.shape[0], cy + 0.85 * s))
+        sub = img[y0:y1, x0:x1]
+        if sub.size == 0:
+            return None
+        hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+        white = ((hsv[..., 1] < 70) & (hsv[..., 2] > 185)).astype(np.uint8)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(white, 8)
+        best = None
+        for i in range(1, n):
+            x, y, w, hh, area = st[i]
+            if area < 0.06 * s * s or not 0.6 < w / max(hh, 1) < 1.6 or max(w, hh) > 0.95 * s:
+                continue
+            comp = (lab[y:y + hh, x:x + w] == i).astype(np.uint8)
+            # convex hull: pips near a round token's rim can break its outline
+            hull = cv2.convexHull(cv2.findNonZero(comp))
+            filled = np.zeros_like(comp)
+            cv2.fillConvexPoly(filled, hull, 1)
+            solidity = filled.sum() / float(w * hh)
+            ink = filled.sum() - comp.sum()          # non-white pixels enclosed by the token = digits/pips
+            if solidity < 0.7 or ink < 0.004 * s * s:
+                continue
+            score = filled.sum() * solidity
+            if best is None or score > best[0]:
+                best = (score, x, y, w, hh, filled)
+        if best is None:
+            return None
+        _, x, y, w, hh, filled = best
+        return sub[y:y + hh, x:x + w], filled
+
+    def _token_features(self, crop: Any, mask: Any) -> dict[str, Any]:
+        """Font-independent cues: pip count, digit count, enclosed holes, red ink."""
+        cv2, np = _cv()
+        f = 4
+        big = cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+        m = cv2.resize(mask, (big.shape[1], big.shape[0]), interpolation=cv2.INTER_NEAREST)
+        m = cv2.erode(m, np.ones((3, 3), np.uint8))
+        hsv = cv2.cvtColor(big, cv2.COLOR_BGR2HSV)
+        redm = (hsv[..., 1] > 90) & ((hsv[..., 0] < 12) | (hsv[..., 0] > 165))
+        # ink = pixels whose darkest channel is low (dark green, black or red digits on white).
+        # Otsu per token keeps blurry, pinkish loop interiors (8, 6, 9) on the paper side.
+        darkest = big.min(axis=2)
+        inside = darkest[m > 0]
+        thr, _ = cv2.threshold(inside.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU) if inside.size else (170, None)
+        ink = ((darkest < min(float(thr), 175.0)) & (m > 0)).astype(np.uint8)
+        H = big.shape[0]
+        n, lab, st, cen = cv2.connectedComponentsWithStats(ink, 8)
+        comps = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] > 12]
+        out = {"pips": 0, "two_digits": None, "holes": None, "red": False}
+        if not comps:
+            return out
+        tallest = max(st[i, cv2.CC_STAT_HEIGHT] for i in comps)
+        glyphs = [i for i in comps if st[i, cv2.CC_STAT_HEIGHT] > 0.5 * tallest]
+        band = [i for i in comps if st[i, cv2.CC_STAT_HEIGHT] < 0.35 * tallest and cen[i][1] > 0.55 * H]
+        # dots that run together (small or blurry captures) make the count unreliable: report unknown
+        merged = any(st[i, cv2.CC_STAT_WIDTH] > 1.6 * st[i, cv2.CC_STAT_HEIGHT] for i in band)
+        out["pips"] = 0 if merged else len(band)
+        gx0 = min(st[i, cv2.CC_STAT_LEFT] for i in glyphs)
+        gx1 = max(st[i, cv2.CC_STAT_LEFT] + st[i, cv2.CC_STAT_WIDTH] for i in glyphs)
+        out["two_digits"] = len(glyphs) >= 2 or (gx1 - gx0) > 0.95 * tallest
+        holes = 0
+        for i in glyphs:
+            x, y, w, hh = (st[i, k] for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+            g = (lab[y:y + hh, x:x + w] == i).astype(np.uint8)
+            cnts, hier = cv2.findContours(g, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            if hier is not None:
+                holes += sum(1 for j, hrow in enumerate(hier[0])
+                             if hrow[3] >= 0 and cv2.contourArea(cnts[j]) > 0.015 * w * hh)
+        out["holes"] = holes
+        glyph_px = sum(st[i, cv2.CC_STAT_AREA] for i in glyphs)
+        red_px = sum(int((redm & (lab == i)).sum()) for i in glyphs)
+        out["red"] = red_px > 0.4 * max(1, glyph_px)
+        return out
+
+    @staticmethod
+    def _feature_scores(feat: dict[str, Any]) -> dict[int, float]:
+        holes_expected = {5: 0, 9: 1, 6: 1, 8: 2}
+        scores = {}
+        for n in NUMBER_COUNTS:
+            sc = 0.0
+            if 1 <= feat["pips"] <= 5:
+                sc += 3.0 if PIPS[n] == feat["pips"] else -3.0
+            if feat["two_digits"] is not None:
+                sc += 1.5 if (n >= 10) == feat["two_digits"] else -1.5
+            sc += 1.0 if (n in (6, 8)) == feat["red"] else -1.0
+            if feat["holes"] is not None and n in holes_expected:
+                sc += 1.0 if holes_expected[n] == min(feat["holes"], 2) else -1.0
+            scores[n] = sc
+        return scores
+
     def read_numbers(self, img: Any, geom: BoardGeometry, terrains: Sequence[Terrain]) -> tuple[list[int | None], list[float]]:
         numbers: list[int | None] = [None] * self.topo.num_hexes
         conf = [1.0] * self.topo.num_hexes
         land = [h for h in range(self.topo.num_hexes) if terrains[h] != Terrain.DESERT]
         all_scores = {}
         for h in land:
-            scores, _ = self._read_token(self._token_crop(img, geom, h))
+            found = self._locate_token(img, geom, h)
+            if found is not None:
+                crop, mask = found
+                feat = self._token_features(crop, mask)
+                scores = self._feature_scores(feat)
+                tmpl, _ = self._read_token(crop)          # font templates / OCR: tie-breaker, or main cue without pips
+                w = 0.3 if 1 <= feat["pips"] <= 5 else 1.5
+                scores = {n: scores[n] + w * tmpl[n] for n in scores}
+            else:
+                scores, _ = self._read_token(self._token_crop(img, geom, h))
             all_scores[h] = scores
             ranked = sorted(scores.items(), key=lambda kv: -kv[1])
             numbers[h] = ranked[0][0]
-            conf[h] = max(0.0, min(1.0, (ranked[0][1] - ranked[1][1]) / 0.25))
+            conf[h] = max(0.0, min(1.0, (ranked[0][1] - ranked[1][1]) / 1.5))
         counts: dict[int, int] = {}
         for h in land:
             counts[numbers[h]] = counts.get(numbers[h], 0) + 1  # type: ignore[index]
@@ -535,7 +671,145 @@ class BoardVisionExtractor:
         return numbers, conf
 
     # -- 4. ports --------------------------------------------------------------
+    def _find_sails(self, img: Any, geom: BoardGeometry) -> list[tuple[tuple[float, float], Any]]:
+        """Colonist ports: white ship sails in the water next to the coast."""
+        cv2, np = _cv()
+        s = geom.size
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        board = self._board_polygon_mask(img.shape[:2], geom).astype(np.uint8)
+        white = ((hsv[..., 1] < 40) & (hsv[..., 2] > 210)).astype(np.uint8)
+        n, lab, st, cen = cv2.connectedComponentsWithStats(white, 8)
+        mids = [geom.edge_px(self.topo, e) for e in self.topo.coastal_edges]
+        out = []
+        for i in range(1, n):
+            x, y, w, h, area = st[i]
+            if not 0.08 * s * s < area < 0.5 * s * s or not 0.6 < w / max(h, 1) < 1.6:
+                continue
+            c = (float(cen[i][0]), float(cen[i][1]))
+            if board[lab == i].mean() > 0.5 or min(math.dist(c, m) for m in mids) > 1.8 * s:
+                continue
+            out.append((c, img[y:y + h, x:x + w]))
+        return out
+
+    @staticmethod
+    def _sail_icon(crop: Any, size: int = 24) -> Any:
+        """Normalised mask of the dark icon on a sail (above the "2:1"/"3:1" text)."""
+        cv2, np = _cv()
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        H = crop.shape[0]
+        dark = ((hsv[..., 2] < 170) & ~((hsv[..., 0] > 90) & (hsv[..., 0] < 130) & (hsv[..., 1] > 80)))  # not sea
+        dark[int(0.58 * H):, :] = False          # drop the ratio text
+        dark[: int(0.08 * H), :] = False
+        n, lab, st, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8), 8)
+        if n > 1:                                 # drop specks (JPEG noise, rigging)
+            biggest = st[1:, cv2.CC_STAT_AREA].max()
+            keep = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 0.1 * biggest]
+            dark = np.isin(lab, keep)
+        ys, xs = np.nonzero(dark)
+        canvas = np.zeros((size, size), np.float32)
+        if len(xs) < 4:
+            return canvas
+        m = dark[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.float32)
+        h, w = m.shape
+        k = (size - 2) / max(h, w)
+        m = cv2.resize(m, (max(1, round(w * k)), max(1, round(h * k))), interpolation=cv2.INTER_AREA)
+        oy, ox = (size - m.shape[0]) // 2, (size - m.shape[1]) // 2
+        canvas[oy:oy + m.shape[0], ox:ox + m.shape[1]] = m
+        return canvas
+
+    def _port_icon_templates(self) -> dict[str, Any] | None:
+        if not hasattr(self, "_icons"):
+            _, np = _cv()
+            path = Path(__file__).with_name("assets") / "port_icons.npz"
+            self._icons = ({k.replace("_", ":"): v for k, v in np.load(path).items()} if path.exists() else None)
+        return self._icons
+
+    def _sail_edge(self, geom: BoardGeometry, c: tuple[float, float]) -> list[tuple[float, int]]:
+        """Coastal edges ranked by how well the sail sits on the edge's outward normal."""
+        _, np = _cv()
+        ranked = []
+        for e in self.topo.coastal_edges:
+            a, b = self.topo.edge_nodes[e]
+            (ax, ay), (bx, by) = geom.node_px(self.topo, a), geom.node_px(self.topo, b)
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            hx, hy = geom.hex_px(self.topo, self.topo.edge_hexes[e][0])
+            nx, ny = mx - hx, my - hy
+            norm = math.hypot(nx, ny)
+            nx, ny = nx / norm, ny / norm
+            vx, vy = c[0] - mx, c[1] - my
+            along, perp = vx * nx + vy * ny, abs(vx * ny - vy * nx)
+            if along <= 0:
+                continue
+            ranked.append((perp + 0.35 * abs(along - 1.0 * geom.size), e))
+        return sorted(ranked)
+
+    def _pier_fractions(self, img: Any, geom: BoardGeometry) -> dict[int, float]:
+        """Share of wooden-pier pixels around each coastal corner (outside the island).
+
+        Colonist joins every port ship to its two corners with wooden piers, so the two
+        corners of a port light up while their neighbours stay near zero.
+        """
+        cv2, np = _cv()
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        pier = (hsv[..., 0] >= 10) & (hsv[..., 0] <= 21) & (hsv[..., 1] > 100) & (hsv[..., 2] > 110)
+        pier &= ~self._board_polygon_mask(img.shape[:2], geom)
+        r = 0.5 * geom.size
+        area = math.pi * r * r
+        out = {}
+        for n in {n for e in self.topo.coastal_edges for n in self.topo.edge_nodes[e]}:
+            x, y = geom.node_px(self.topo, n)
+            x0, y0 = int(max(0, x - r)), int(max(0, y - r))
+            sub = pier[y0:int(y + r) + 1, x0:int(x + r) + 1]
+            out[n] = float((sub & _disc_mask(sub.shape, x - x0, y - y0, r)).sum()) / area
+        return out
+
     def detect_ports(self, img: Any, lab: Any, geom: BoardGeometry) -> list[dict[str, Any]]:
+        sails = self._find_sails(img, geom)
+        if len(sails) >= 5:
+            return self._ports_from_sails(sails, geom, img)
+        return self._ports_from_probes(img, lab, geom)
+
+    def _ports_from_sails(self, sails: list[tuple[tuple[float, float], Any]], geom: BoardGeometry,
+                          img: Any) -> list[dict[str, Any]]:
+        _, np = _cv()
+        piers = self._pier_fractions(img, geom)
+        # unique edge per sail: geometric fit plus pier evidence at both corners; ports never share a corner
+        cands = sorted((score / geom.size - 20.0 * sum(piers.get(n, 0.0) for n in self.topo.edge_nodes[e]), i, e)
+                       for i, (c, _) in enumerate(sails) for score, e in self._sail_edge(geom, c)[:4])
+        used_nodes: set[int] = set()
+        edge_of: dict[int, int] = {}
+        for score, i, e in cands:
+            a, b = self.topo.edge_nodes[e]
+            if i in edge_of or a in used_nodes or b in used_nodes:
+                continue
+            edge_of[i] = e
+            used_nodes.update((a, b))
+        idx = sorted(edge_of)
+        templates = self._port_icon_templates()
+        labels = list(templates) if templates else []
+        types: list[str] = ["3:1"] * len(idx)
+        conf = [0.5] * len(idx)
+        if templates:
+            costs = []
+            for i in idx:
+                icon = self._sail_icon(sails[i][1])
+                row = []
+                for k in labels:
+                    t = templates[k]
+                    den = math.sqrt(float((icon * icon).sum()) * float((t * t).sum())) or 1.0
+                    row.append(1.0 - float((icon * t).sum()) / den)
+                costs.append(row)
+            quotas = {k: (4 if k == "3:1" else 1) for k in labels}
+            if len(idx) == 9:
+                types = _quota_assign(costs, labels, quotas)
+            else:
+                types = [labels[int(np.argmin(r))] for r in costs]
+            conf = [round(max(0.0, 1.0 - r[labels.index(t)]), 3) for r, t in zip(costs, types)]
+        ports = [{"type": t, "nodes": list(self.topo.edge_nodes[edge_of[i]]), "edge": edge_of[i], "confidence": c}
+                 for i, t, c in zip(idx, types, conf)]
+        return sorted(ports, key=lambda p: self.topo.coastal_edges.index(p["edge"]))
+
+    def _ports_from_probes(self, img: Any, lab: Any, geom: BoardGeometry) -> list[dict[str, Any]]:
         _, np = _cv()
         water = _rgb_to_lab(self.cfg.water_rgb)
         port_lab = {k: _rgb_to_lab(v) for k, v in self.cfg.port_rgb.items()}
@@ -592,6 +866,10 @@ class BoardVisionExtractor:
             if f < self.cfg.piece_min_fraction:
                 continue
             outer = self._color_fraction(lab, x, y, 0.34 * s, colors)[c]
+            ring = self._color_fraction(lab, x, y, 0.5 * s, colors)[c]
+            # a piece is a compact blob; tile art of a similar colour fills the wider ring too
+            if ring > 0.45:
+                continue
             # settlement disc ~ (0.2/0.34)^2 of the probe; a city fills noticeably more
             ratio = outer / ((0.20 / 0.34) ** 2)
             kind = "cities" if ratio > self.cfg.city_area_ratio else "settlements"
@@ -605,26 +883,62 @@ class BoardVisionExtractor:
         return out
 
     def _line_fraction(self, lab: Any, geom: BoardGeometry, e: int, protos: dict[str, Any]) -> dict[str, float]:
-        """Fraction of points along the edge's middle third whose 3x3 neighbourhood (median) matches."""
+        """Fraction of points along the edge's middle third that look like a road of each colour.
+
+        A point counts when the colour covers a bar across the edge line (just off the line on
+        both sides) but not the tiles further out: tile borders and shading are one-sided
+        lines, tile art is wide, a road is neither.
+        """
         _, np = _cv()
         a, b = self.topo.edge_nodes[e]
         (ax, ay), (bx, by) = geom.node_px(self.topo, a), geom.node_px(self.topo, b)
+        length = math.hypot(bx - ax, by - ay) or 1.0
+        px, py = -(by - ay) / length, (bx - ax) / length      # unit normal
+        off = 0.22 * geom.size
         ts = np.linspace(0.35, 0.65, 9)
         hits = {c: 0 for c in protos}
         h, w = lab.shape[:2]
+
+        def match(x: float, y: float, proto: Any, window: int = 1) -> bool:
+            xi, yi = int(round(x)), int(round(y))
+            patch = lab[max(0, yi - window):min(h, yi + window + 1), max(0, xi - window):min(w, xi + window + 1)]
+            patch = patch.reshape(-1, 3)
+            return patch.size > 0 and float(np.median(np.linalg.norm(patch - proto, axis=1))) < self.cfg.piece_threshold
+
+        core = max(1.5, 0.035 * geom.size)    # a road bar covers both sides of the edge line
         for t in ts:
-            x, y = int(round(ax + (bx - ax) * t)), int(round(ay + (by - ay) * t))
-            patch = lab[max(0, y - 1):min(h, y + 2), max(0, x - 1):min(w, x + 2)].reshape(-1, 3)
-            if patch.size == 0:
-                continue
+            x, y = ax + (bx - ax) * t, ay + (by - ay) * t
             for c, proto in protos.items():
-                if float(np.median(np.linalg.norm(patch - proto, axis=1))) < self.cfg.piece_threshold:
+                if (match(x, y, proto) and match(x + px * core, y + py * core, proto, 0)
+                        and match(x - px * core, y - py * core, proto, 0)
+                        and not (match(x + px * off, y + py * off, proto) and match(x - px * off, y - py * off, proto))):
                     hits[c] += 1
         return {c: k / len(ts) for c, k in hits.items()}
 
     def detect_robber(self, img: Any, geom: BoardGeometry, terrains: Sequence[Terrain]) -> int:
+        return self._find_robber(img, geom, terrains)[0]
+
+    def _find_robber(self, img: Any, geom: BoardGeometry, terrains: Sequence[Terrain]) -> tuple[int, bool]:
+        """(hex, sure).  Colonist's robber is a pale grey statue; classic art uses a dark figure."""
         cv2, np = _cv()
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        s = geom.size
+        grey = ((hsv[..., 1] < 28) & (hsv[..., 2] > 140) & (hsv[..., 2] < 215)).astype(np.uint8)
+        statue = []
+        for h in range(self.topo.num_hexes):
+            if terrains[h] == Terrain.MOUNTAINS:       # grey rock art: the statue can't be told apart
+                continue
+            cx, cy = geom.hex_px(self.topo, h)
+            x0, y0 = int(max(0, cx - 0.75 * s)), int(max(0, cy - 0.75 * s))
+            sub = grey[y0:int(cy + 0.75 * s), x0:int(cx + 0.75 * s)] * _disc_mask(
+                grey[y0:int(cy + 0.75 * s), x0:int(cx + 0.75 * s)].shape, cx - x0, cy - y0, 0.72 * s).astype(np.uint8)
+            n, _, st, _ = cv2.connectedComponentsWithStats(sub, 8)
+            big = max((st[i, cv2.CC_STAT_AREA] for i in range(1, n)
+                       if 0.4 < st[i, cv2.CC_STAT_WIDTH] / max(1, st[i, cv2.CC_STAT_HEIGHT]) < 1.4), default=0)
+            statue.append((big / (s * s), h))
+        frac, h = max(statue, default=(0.0, -1))
+        if frac > 0.05:
+            return h, True
         best, best_frac = None, 0.0
         for h in range(self.topo.num_hexes):
             cx, cy = geom.hex_px(self.topo, h)
@@ -638,8 +952,8 @@ class BoardVisionExtractor:
             if frac > best_frac:
                 best, best_frac = h, frac
         if best is None or best_frac < 0.04:
-            return terrains.index(Terrain.DESERT)
-        return best
+            return terrains.index(Terrain.DESERT), False
+        return best, True
 
     # -- debugging ----------------------------------------------------------------
     def render_debug(self, image: Any, geom: BoardGeometry | None = None) -> Any:
@@ -720,8 +1034,8 @@ def render_synthetic_board(data: dict[str, Any], *, size: float = 56.0, margin: 
             t0, t1 = 0.22, 0.78
             p0 = (int(ax + (bx - ax) * t0), int(ay + (by - ay) * t0))
             p1 = (int(ax + (bx - ax) * t1), int(ay + (by - ay) * t1))
-            cv2.line(img, p0, p1, (20, 20, 20), max(2, int(0.16 * size)), cv2.LINE_AA)
-            cv2.line(img, p0, p1, col, max(2, int(0.11 * size)), cv2.LINE_AA)
+            cv2.line(img, p0, p1, (20, 20, 20), max(3, int(0.21 * size)), cv2.LINE_AA)   # Colonist-like thick bar
+            cv2.line(img, p0, p1, col, max(2, int(0.16 * size)), cv2.LINE_AA)
         for kind, rad in (("settlements", 0.20), ("cities", 0.29)):
             for n in pd.get(kind, []):
                 x, y = geom.node_px(topo, int(n))

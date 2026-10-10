@@ -516,3 +516,35 @@ def test_gui_new_game_and_autosave(data: dict, tmp_path: Path) -> None:
         assert res["state"]["phase"] == "main"
     finally:
         server.shutdown()
+
+
+# -- real Colonist.io screenshot ------------------------------------------------------
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.mark.parametrize("variant", ["original", "small", "large", "jpeg", "padded", "darker", "warm"])
+def test_vision_on_real_colonist_screenshot(variant: str) -> None:
+    cv2 = pytest.importorskip("cv2")
+    from catan.vision_extractor import BoardVisionExtractor
+
+    img = cv2.imread(str(FIXTURES / "colonist_mobile_board.jpg"))
+    truth = json.loads((FIXTURES / "colonist_mobile_board.json").read_text())
+    if variant == "small":
+        img = cv2.resize(img, None, fx=0.6, fy=0.6, interpolation=cv2.INTER_AREA)
+    elif variant == "large":
+        img = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    elif variant == "jpeg":
+        img = cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 35])[1], cv2.IMREAD_COLOR)
+    elif variant == "darker":  # photo of a screen / dim capture
+        img = (img * 0.65).astype("uint8")
+    elif variant == "warm":    # colour cast
+        img = (img * [0.85, 0.97, 1.0]).clip(0, 255).astype("uint8")
+    elif variant == "padded":  # desktop-style wide canvas
+        img = cv2.copyMakeBorder(img, 300, 300, 500, 500, cv2.BORDER_CONSTANT, value=tuple(int(v) for v in img[5, 5]))
+    data = BoardVisionExtractor().extract(img).data
+    assert [[h["terrain"], h["number"]] for h in data["hexes"]] == truth["hexes"]
+    assert data["robber_hex"] == truth["robber_hex"]
+    assert sorted([p["type"], p["nodes"]] for p in data["ports"]) == sorted(truth["ports"])
+    assert not any(p["settlements"] or p["cities"] or p["roads"] for p in data["players"])  # empty board
+    GameState.from_dict(data)
