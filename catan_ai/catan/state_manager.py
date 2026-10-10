@@ -29,6 +29,7 @@ Corrections (joining mid-game, fixing a misread screenshot)::
     devs <player> <unplayed> [knights] [vp]   set dev cards held, knights played, VP cards shown
     name <player> <name>             label a player (``name black PrideNL``); names work in commands
     order <p1> <p2> <p3> <p4>        set the turn order
+    rules vp=10 discard=7 friendly=off   room rules: VP to win, discard limit, friendly robber
     tile <hex> [terrain] [number] [robber]   ``tile 4 hills 6``, ``tile 9 desert``, ``tile 4 robber``
     port <edge|a-b> <3:1|res|none>   set or remove the port on a coastal edge
     piece <node|a-b|eN> <player|none> [city]   place/remove a piece without rules or costs
@@ -65,6 +66,8 @@ from .board import (
     NUMBER_COUNTS, PLAYER_COLORS, PORT_GENERIC, PORT_TYPES, RES_INDEX, RESOURCE_TERRAIN, RESOURCES,
     SCHEMA_VERSION, Board, BoardValidationError, Port, Resource, Terrain, parse_resource,
 )
+
+DEFAULT_RULES: dict[str, Any] = {"vp_target": 10, "discard_limit": 7, "friendly_robber": False}
 
 COMMAND_HELP = __doc__.split("Every command is parsed")[0].strip()
 
@@ -333,6 +336,7 @@ class GameState:
     log: list[str] = field(default_factory=list)
     last_roll: int | None = None
     names: dict[str, str] = field(default_factory=dict)   # player colour -> display name
+    rules: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_RULES))
     _history: list["GameState"] = field(default_factory=list, repr=False)
 
     # -- construction ------------------------------------------------------
@@ -388,6 +392,7 @@ class GameState:
         game.turn_number = int(data.get("turn_number", 1))
         game.perspective = data.get("perspective")
         game.names = {c: str(n) for c, n in (data.get("names") or {}).items() if c in game.players}
+        game.rules = {**DEFAULT_RULES, **{k: v for k, v in (data.get("rules") or {}).items() if k in DEFAULT_RULES}}
         game.phase = data.get("phase", "main")
         game.pending_discards = {k: int(v) for k, v in data.get("pending_discards", {}).items()}
         game.last_roll = data.get("last_roll")
@@ -412,6 +417,7 @@ class GameState:
         out["turn_number"] = self.turn_number
         out["perspective"] = self.perspective
         out["names"] = self.names
+        out["rules"] = self.rules
         out["players"] = [
             {"color": c, "settlements": sorted(p.settlements), "cities": sorted(p.cities),
              "roads": sorted(p.roads), "dev_cards": p.dev_hidden,
@@ -496,6 +502,39 @@ class GameState:
             if len(named) == 1:
                 return named[0]
         raise CommandError(f"unknown or ambiguous player '{token}' (players: {', '.join(self.order)})")
+
+    def friendly_blocked(self, thief: str) -> dict[int, str]:
+        """Hexes the robber may not enter under the friendly-robber rule (hex -> protected players)."""
+        if not self.rules.get("friendly_robber"):
+            return {}
+        weak = {c for c in self.order if c != thief and self.public_vp(c) <= 2}
+        out = {}
+        for h in range(self.board.topology.num_hexes):
+            hit = sorted({o[0] for n in self.board.topology.hex_nodes[h] if (o := self.node_owner(n)) and o[0] in weak})
+            if hit:
+                out[h] = ", ".join(hit)
+        return out
+
+    def winner(self) -> str | None:
+        target = int(self.rules["vp_target"])
+        best = [c for c in self.order if self.public_vp(c) + (self.players[c].dev_known.get("vp", 0)
+                                                                if c == self.perspective else 0) >= target]
+        return best[0] if best else None
+
+    def _ev_show_rules(self, ev: Mapping[str, Any]) -> str:
+        return self._ev_set_rules({"rules": {}})
+
+    def _ev_set_rules(self, ev: Mapping[str, Any]) -> str:
+        rules = dict(self.rules)
+        for k, v in ev["rules"].items():
+            if k not in DEFAULT_RULES:
+                raise CommandError(f"unknown rule '{k}' (vp, discard, friendly)")
+            rules[k] = bool(v) if k == "friendly_robber" else int(v)
+        if not 3 <= rules["vp_target"] <= 30 or not 3 <= rules["discard_limit"] <= 30:
+            raise CommandError("VP target and discard limit must be between 3 and 30")
+        self.rules = rules
+        return (f"rules: {rules['vp_target']} VP to win, discard above {rules['discard_limit']} cards, "
+                f"friendly robber {'on' if rules['friendly_robber'] else 'off'}")
 
     def label(self, color: str) -> str:
         return f"{self.names[color]} ({color})" if self.names.get(color) else color
@@ -745,8 +784,9 @@ class GameState:
         self._setup_guard("roll")
         self.last_roll = roll
         if roll == 7:
+            limit = int(self.rules["discard_limit"])
             self.pending_discards = {c: self.hand_total(c) // 2 for c in self.order
-                                     if self.hand_total(c) > 7}
+                                     if self.hand_total(c) > limit}
             self.phase = "discard" if self.pending_discards else "robber"
             if self.pending_discards:
                 need = ", ".join(f"{c} {n}" for c, n in self.pending_discards.items())
@@ -813,6 +853,9 @@ class GameState:
         if h == self.board.robber_hex:
             raise CommandError("robber must move to a different hex")
         self._setup_guard("move the robber")
+        blocked = self.friendly_blocked(ev.get("thief") or self.current_color)
+        if h in blocked:
+            raise CommandError(f"friendly robber: hex {h} touches a player with 2 VP or less ({blocked[h]})")
         self.board.robber_hex = h
         thief = ev.get("thief") or self.current_color
         msg = f"robber -> {self.board.hex_label(h)}"
@@ -1290,6 +1333,18 @@ def parse_command(line: str, game: GameState) -> dict[str, Any]:
         need(1, "name <player> [name]")
         raw = shlex.split(line.strip())[2:]   # keep the name's original case
         return {"type": "set_name", "player": game.resolve_player(args[0]), "name": " ".join(raw)}
+    if cmd == "rules":
+        keys = {"vp": "vp_target", "target": "vp_target", "discard": "discard_limit", "limit": "discard_limit",
+                "friendly": "friendly_robber"}
+        out: dict[str, Any] = {}
+        for a in args:
+            k, _, v = a.partition("=")
+            if k not in keys or not v:
+                raise CommandError("usage: rules vp=10 discard=7 friendly=on")
+            out[keys[k]] = v in ("on", "yes", "true", "1") if keys[k] == "friendly_robber" else int(v)
+        if not out:
+            return {"type": "show_rules"}
+        return {"type": "set_rules", "rules": out}
     if cmd == "order":
         need(len(game.order), "order <player> <player> ... (every player once)")
         return {"type": "set_order", "order": [game.resolve_player(a) for a in args]}

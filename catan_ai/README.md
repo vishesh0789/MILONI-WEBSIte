@@ -32,6 +32,9 @@ screenshot ──► vision_extractor ──► board JSON ──► GameState �
    the analysis board opens in your browser. Keep the Terminal window open while you play.
    * `./start.command --me red` sets your colour.
    * `./start.command --resume` continues the last game.
+   * `./start.command --lan` also lets your phone open the board: it prints an address like
+     `http://192.168.1.20:8765/` to type into the phone's browser (same Wi-Fi). There's no
+     password, so use it only on a network you trust.
 
 If macOS says the file can't be opened, right-click it, choose **Open**, then **Open** again (needed
 once). Other ways to run it:
@@ -40,7 +43,7 @@ once). Other ways to run it:
 python -m catan.gui_server --me red      # the analysis board (what start.command runs)
 python -m catan.state_manager board.json --me red   # keyboard-only tracker in the terminal
 python run_demo.py [--vision]            # scripted demo: d 6, d 8, d 7 and AI advice
-python -m pytest                         # 48 tests
+python -m pytest                         # 50 tests
 ```
 
 ## Analysis board GUI
@@ -78,6 +81,9 @@ A local server (standard library only) opens a browser page that drives the same
   * The selected player stays selected until you change it, and setup can be placed in any
     order.
   * The engine never moves on its own: ▶ play needs a second click to apply.
+* **Room rules.** In the Players dialog, set VP to win, the discard limit and friendly robber to
+  match your Colonist room. The tracker enforces them (discards, protected tiles), the engine
+  plans and simulates with them, and a banner shows when someone reaches the target.
 * **Editable game log.** Every move has **✕ delete** and **↶ back to here**.
   * Deleting replays the game from its start without that move. Later moves that no longer fit
     are dropped and listed. Builds that are now short of cards are kept, with a note that the
@@ -223,6 +229,7 @@ terrain colours for an unusual theme.
 | `devs <player> <unplayed> [knights] [vp]` | `devs blue 2 1 0` | Set dev cards held, knights already played, VP cards shown |
 | `name <player> <name>` | `name black PrideNL` | Name a player; names work in every command |
 | `order <p1> <p2> <p3> <p4>` | `order red blue black orange` | Set the turn order |
+| `rules vp=<n> discard=<n> friendly=on\|off` | `rules vp=12 friendly=on` | Room rules; `rules` alone shows them |
 | `tile <hex> [terrain] [number] [robber]` | `tile 4 hills 6` | Fix a tile (also `tile 4 robber`) |
 | `port <edge> <type>` | `port 20-26 ore`, `port 12 none` | Set or remove a port on a coastal edge |
 | `piece <node\|a-b> <player\|none> [city]` | `piece 24 red city` | Place or remove a piece without rules or costs |
@@ -264,7 +271,8 @@ A log scraper or websocket bridge can push the same events as JSON:
   opponents reach first (`free` / `race` / `behind`).
 * **Robber.** Blocked cards over about 8 rolls, scaled by each victim's VP lead and a near-monopoly
   bonus, plus the steal value (higher if the victim holds more than 7). Own buildings are penalised
-  at 1.5×.
+  at 1.5×. It never recommends robbing only yourself while a harmless tile exists, and it
+  respects the friendly robber.
 * **Trade evaluator.** Hand potential toward the build goals (city, settlement, road, dev card) with
   dynamic per-resource values. Helping a leading trade partner is penalised.
 * **Position score.** VP (including expected hidden VP cards) plus production value, diversity,
@@ -300,7 +308,9 @@ rolling, or a knight first.
   before rolling.
 * Vision is verified on one real Colonist board (plus synthetic renders). Piece detection has not
   been tested on real Colonist pieces yet; see the vision section.
-* The rollout policy is greedy and simplified: no player-to-player trades, and a basic
-  monopoly/YOP policy. Win % is a strength signal between moves, not a calibrated probability.
+* The rollout policy is greedy and simplified. Player trades are basic: 1-for-1, accepted half the
+  time, and refused to anyone within 2 VP of winning. Monopoly and YOP use a basic policy. Win % is
+  a strength signal between moves, not a calibrated probability.
+* Only the standard 19-hex base map is supported (not 5-6 player or Seafarers maps).
 * Rule enforcement is advisory. For example, the tracker doesn't stop a dev card being played on
   the turn it was bought.

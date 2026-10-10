@@ -318,6 +318,7 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
       <tr><td><code>p red knight</code> · <code>mono w</code> · <code>yop o o</code> · <code>rb</code> · <code>vp</code></td><td>play a dev card</td></tr>
       <tr><td><code>hand blue 2w o</code> · <code>hand blue 5</code> · <code>devs blue 2 1 0</code></td><td>set a hand (exact, or just a count) · dev cards held, knights played, VP cards shown</td></tr>
       <tr><td><code>name black PrideNL</code> · <code>order red blue black orange</code></td><td>name a player (names work in commands) · set the turn order</td></tr>
+      <tr><td><code>rules vp=12 discard=9 friendly=on</code></td><td>room rules: VP to win, discard limit, friendly robber</td></tr>
       <tr><td><code>tile 4 hills 6</code> · <code>port 20-26 ore</code> · <code>piece 24 red city</code></td><td>fix the board</td></tr>
       <tr><td><code>n</code> · <code>u</code> · <code>help</code></td><td>end turn · undo · list every command</td></tr>
     </table></div>
@@ -341,7 +342,7 @@ const U = 100; // svg units per hex radius
 
 let S = null, A = null;
 let actor = null, actorPinned = false;
-let seq = 0, analyzing = false, editMode = false, freeRoads = 0;
+let seq = 0, analyzing = false, editMode = false, freeRoads = 0, armed = null;
 const opt = { live: true, heat: true, ids: false, depth: 80 };
 try { Object.assign(opt, JSON.parse(localStorage.getItem("catan-opts") || "{}")); } catch (e) { /* storage blocked */ }
 const saveOpts = () => { try { localStorage.setItem("catan-opts", JSON.stringify(opt)); } catch (e) { /* ignore */ } };
@@ -383,6 +384,7 @@ function toast(msg, ms = 3200, err = false) {
 
 function setState(state) {
   if (!state || state.offline) return;
+  if (!S || state.version !== S.version) armed = null;
   S = state;
   if (!S.order.includes(actor)) actorPinned = false;   // the selected player stays selected until you change it
   if (!actorPinned) actor = S.setup_next ? S.setup_next[0] : S.current;
@@ -647,6 +649,7 @@ function cardPop(c, r, x, y) {
 
 function playersPop(x, y) {
   const rows = S.order.map((c) => ({ old: c, color: c, name: player(c).name || "" }));
+  const rules = { ...S.rules };
   const draw = () => openPop(`<h4>Players · colours, names and turn order</h4>
     ${rows.map((r, i) => `<div class="row" data-row="${i}">
         <span style="width:18px" class="sub">${i + 1}.</span>${dotHtml(r.color)}
@@ -656,7 +659,12 @@ function playersPop(x, y) {
         <button class="opt" data-act="downr" data-arg="${i}" ${i === rows.length - 1 ? "disabled" : ""} title="later in the turn order">▼</button>
       </div>`).join("")}
     <div class="sub">Changing a colour updates every piece and every logged move. Names can be used in commands too.</div>
+    <div class="lbl">Room rules (match your Colonist room)</div>
+    <div id="rules">${stepperHtml(["vp_target", "discard_limit"], rules, ["VP to win", "discard above"])}</div>
+    <label class="toggle" for="r-friendly"><input type="checkbox" id="r-friendly" ${rules.friendly_robber ? "checked" : ""}> Friendly robber (can't rob players with 2 VP or less)</label>
     <div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="save">Save</button></div>`, x, y, (el) => {
+    bindSteppers(el.querySelector("#rules"), rules, null, () => 30);
+    el.querySelector("#r-friendly").addEventListener("change", (ev) => { rules.friendly_robber = ev.target.checked; });
     el.querySelectorAll("[data-colour]").forEach((s2) => s2.addEventListener("change", () => { rows[+s2.dataset.colour].color = s2.value; sync(el); draw(); }));
     onActs(el, {
       upr: (i) => { sync(el); i = +i; [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); },
@@ -666,7 +674,8 @@ function playersPop(x, y) {
         sync(el);
         const colors = Object.fromEntries(rows.map((r) => [r.old, r.color]));
         const names = Object.fromEntries(rows.map((r) => [r.color, r.name]));
-        const res = await api("/api/players", { colors, names, order: rows.map((r) => r.color) });
+        rules.vp_target = Math.max(3, rules.vp_target); rules.discard_limit = Math.max(3, rules.discard_limit);
+        const res = await api("/api/players", { colors, names, order: rows.map((r) => r.color), rules });
         if (!res.ok) return toast(res.error, 6000, true);
         closePop(); showProblems(res); setState(res.state); toast("Players updated.");
       },
@@ -689,6 +698,8 @@ async function logAction(kind, id) {
 
 function robberPop(h, x, y) {
   if (h === S.robber) return toast("The robber is already on that tile.");
+  if (S.friendly_blocked && S.friendly_blocked[h] !== undefined)
+    return toast(`Friendly robber: this tile touches ${S.friendly_blocked[h]} (2 VP or less). Pick another tile.`, 5000, true);
   const thief = S.phase === "robber" ? S.current : (actor || S.current), victims = new Set();
   for (const n of S.topology.hex_nodes[h]) { const o = nodeOwner(n); if (o && o[0] !== thief) victims.add(o[0]); }
   const tile = S.tiles[h];
@@ -895,7 +906,8 @@ function renderStatus() {
   $("status").innerHTML = `
     <span class="chip">Turn <b>${S.turn}</b></span>
     <span class="chip ${ph === "setup" ? "setup" : ph === "main" ? "" : "alert"}">${dotHtml(cur)}<b>${pname(cur)}</b>&nbsp;${what}</span>
-    ${S.last_roll && ph !== "setup" ? `<span class="chip">Rolled <b>${S.last_roll}</b></span>` : ""}`;
+    ${S.last_roll && ph !== "setup" ? `<span class="chip">Rolled <b>${S.last_roll}</b></span>` : ""}
+    ${S.rules.vp_target !== 10 || S.rules.discard_limit !== 7 || S.rules.friendly_robber ? `<span class="chip" title="room rules (Players to change)">${S.rules.vp_target} VP · discard &gt;${S.rules.discard_limit}${S.rules.friendly_robber ? " · friendly robber" : ""}</span>` : ""}`;
   const me = $("opt-me");
   me.innerHTML = `<option value="">Me: pick your colour</option>` + S.order.map((c) => `<option value="${c}" ${S.perspective === c ? "selected" : ""}>Me: ${player(c).name ? esc(player(c).name) + " (" + c + ")" : c}</option>`).join("");
   me.classList.toggle("needs", !S.perspective);
@@ -914,6 +926,9 @@ function renderBanner() {
     html = `<span class="msg"><b>Editing the board.</b> Click a tile for its terrain, number or the robber; a coastal edge for ports; a corner or edge for pieces of any colour. Nothing here costs cards.</span>
       <button class="btn" data-act="done">Done editing</button>
       <span class="warns">Board check: ${S.board_warnings.length ? S.board_warnings.map(esc).join(" · ") : "looks like a standard board."}</span>`;
+  } else if (S.winner) {
+    cls = "setup";
+    html = `<span class="msg"><b>Game over:</b> <b>${pname(S.winner)}</b> has reached ${S.rules.vp_target} VP. You can keep logging, undo, or start a new game.</span>`;
   } else if (S.phase === "setup") {
     cls = "setup";
     const a = actor || S.current, pend = player(a).pending_setup;
@@ -1011,14 +1026,23 @@ function renderEngine() {
       ${A.notes.map((n) => `<div class="notes">${esc(n)}</div>`).join("")}
       ${opt.live ? "" : `<div style="margin-top:10px"><button class="btn" data-act="analyze">Analyse again</button></div>`}
     </div>`;
+  // nothing is applied without a second click; the armed move survives the engine refreshing the list
+  if (armed && Date.now() - armed.at < 5000) {
+    const j = A.moves.findIndex((m) => m.label === armed.label);
+    const btn = j >= 0 && bd.querySelector(`[data-act=play][data-arg="${j}"]`);
+    if (btn) { btn.classList.add("armed"); btn.textContent = "Apply?"; }
+  }
   onActs(bd, { analyze, play: (i, b) => {
-    if (!b.classList.contains("armed")) {           // nothing is applied without a second click
+    const m = A.moves[Number(i)];
+    if (!(armed && armed.label === m.label && Date.now() - armed.at < 5000)) {
+      armed = { label: m.label, at: Date.now() };
       bd.querySelectorAll(".play.armed").forEach((o) => { o.classList.remove("armed"); o.textContent = "▶ play"; });
       b.classList.add("armed"); b.textContent = "Apply?";
-      setTimeout(() => { if (b.isConnected) { b.classList.remove("armed"); b.textContent = "▶ play"; } }, 4000);
+      setTimeout(() => { if (armed && Date.now() - armed.at >= 5000 && b.isConnected) { armed = null; b.classList.remove("armed"); b.textContent = "▶ play"; } }, 5100);
       return;
     }
-    const [x, y] = anchorOf(b); playMove(A.moves[Number(i)], x - 220, y);
+    armed = null;
+    const [x, y] = anchorOf(b); playMove(m, x - 220, y);
   } });
 }
 

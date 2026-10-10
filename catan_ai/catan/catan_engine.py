@@ -284,8 +284,10 @@ class CatanEngine:
                 shares[(c, i)] = prod[i]
         totals = [sum(shares[(c, i)] for c in g.order) or 1.0 for i in range(NUM_RES)]
         options = []
+        blocked = g.friendly_blocked(color)
+        self_hits: dict[int, bool] = {}
         for h, tile in enumerate(board.tiles):
-            if h == board.robber_hex:
+            if h == board.robber_hex or h in blocked:
                 continue
             loss, self_loss = 0.0, 0.0
             victims: dict[str, float] = {}
@@ -316,6 +318,10 @@ class CatanEngine:
             score = loss + steal - 1.5 * self_loss
             detail = f"blocks {loss:.1f} wtd cards" + (f", self -{self_loss:.1f}" if self_loss else "")
             options.append(RobberOption(h, best_victim, score, detail))
+            self_hits[h] = self_loss > 0 and loss == 0 and best_victim is None
+        # robbing only yourself is never right while a harmless tile exists
+        if any(not hit for hit in self_hits.values()):
+            options = [o for o in options if not self_hits[o.hex]]
         options.sort(key=lambda o: -o.score)
         return options[:top]
 
@@ -343,7 +349,8 @@ class CatanEngine:
         # the closest goal dominates; secondary goals still give cards some value
         goal_value = (progress[0] + 0.25 * sum(progress[1:])) if progress else 0.0
         total = sum(hand)
-        risk = (1 / 6) * (total / 2) * 0.12 if total > 7 else 0.0  # P(7) * expected discard
+        limit = int((game or self.game).rules.get("discard_limit", 7))
+        risk = (1 / 6) * (total / 2) * 0.12 if total > limit else 0.0  # P(7) * expected discard
         return 0.5 * goal_value + 0.04 * total - risk
 
     def resource_values(self, color: str, hand: Sequence[float] | None = None,
@@ -739,7 +746,7 @@ class _SimStatic:
 class _Sim:
     __slots__ = ("s", "rng", "np", "hands", "owner", "level", "roads", "edge_owner", "vp_hidden",
                  "knights", "knights_ready", "deck", "bank", "robber", "lr_owner", "la_owner",
-                 "lr_len", "rates", "n_sett", "n_city", "n_road")
+                 "lr_len", "rates", "n_sett", "n_city", "n_road", "win_vp", "discard_limit", "friendly")
 
     def __init__(self, st: _SimStatic, game: GameState, rng: random.Random):
         self.s = st
@@ -792,6 +799,9 @@ class _Sim:
             self.vp_hidden[i] += p.vp_cards
         self.deck = pool[: game.dev_deck]
         self.bank = list(game.bank)
+        self.win_vp = int(game.rules.get("vp_target", WIN_VP))
+        self.discard_limit = int(game.rules.get("discard_limit", 7))
+        self.friendly = bool(game.rules.get("friendly_robber", False))
         self.robber = game.board.robber_hex
         self.lr_owner = order.index(game.longest_road_owner) if game.longest_road_owner else -1
         self.la_owner = order.index(game.largest_army_owner) if game.largest_army_owner else -1
@@ -851,7 +861,7 @@ class _Sim:
             for i in range(self.np):
                 h = self.hands[i]
                 total = sum(h)
-                if total > 7:
+                if total > self.discard_limit:
                     for _ in range(total // 2):
                         j = max(range(NUM_RES), key=lambda k: h[k])
                         h[j] -= 1
@@ -876,11 +886,11 @@ class _Sim:
         for _ in range(8):
             if not self._act(p):
                 break
-            if self.vp(p) >= WIN_VP:
+            if self.vp(p) >= self.win_vp:
                 return True
         if self.knights_ready[p] == 0:
             pass
-        return self.vp(p) >= WIN_VP
+        return self.vp(p) >= self.win_vp
 
     def _robber_hits(self, p: int) -> bool:
         return any(self.owner[n] == p for n in self.s.topo.hex_nodes[self.robber])
@@ -889,8 +899,9 @@ class _Sim:
         st = self.s
         vps = [self.vp(i) for i in range(self.np)]
         best_h, best_v = self.robber, -1e9
+        protected = {i for i in range(self.np) if i != p and vps[i] - self.vp_hidden[i] <= 2} if self.friendly else set()
         for h in range(len(st.hex_pips)):
-            if h == self.robber:
+            if h == self.robber or any(self.owner[n] in protected for n in st.topo.hex_nodes[h]):
                 continue
             v = 0.0
             for n in st.topo.hex_nodes[h]:
@@ -994,6 +1005,28 @@ class _Sim:
                     h[need] += 1
                     self.bank[need] -= 1
                     return True
+            if self._table_trade(p, need, cost):
+                return True
+        return False
+
+    def _table_trade(self, p: int, need: int, cost: Sequence[int]) -> bool:
+        """1-for-1 trade with another player; nobody helps a player close to winning."""
+        if self.vp(p) >= self.win_vp - 2 or self.rng.random() < 0.5:
+            return False
+        h = self.hands[p]
+        spare = [i for i in range(NUM_RES) if i != need and h[i] - cost[i] > 0]
+        if not spare:
+            return False
+        for q in self.rng.sample(range(self.np), self.np):
+            hq = self.hands[q]
+            if q == p or hq[need] < 2:          # partners keep their last card of a kind
+                continue
+            give = max(spare, key=lambda i: (h[i] - cost[i], -hq[i]))
+            h[give] -= 1
+            hq[give] += 1
+            hq[need] -= 1
+            h[need] += 1
+            return True
         return False
 
     def _best_road(self, p: int) -> int | None:

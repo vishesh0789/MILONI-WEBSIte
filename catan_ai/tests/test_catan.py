@@ -614,3 +614,42 @@ def test_session_delete_drops_moves_that_no_longer_fit(data: dict) -> None:
     problems = s.delete(s.actions[0]["id"])   # remove the settlement: its road has nothing to attach to
     assert problems and "dropped" in problems[0]
     assert not s.game.players["red"].roads and not s.actions
+
+
+# -- room rules ---------------------------------------------------------------------
+
+
+def test_room_rules_discard_limit_friendly_robber_and_winner(game: GameState) -> None:
+    game.execute("g blue 2w 2b 2s 2g")          # blue: 11 cards
+    game.execute("rules discard=11")
+    game.execute("7")
+    assert game.phase == "robber"                # 11 is not above the limit of 11
+    game.execute("u")
+    game.execute("rules discard=7 friendly=on")
+    game.execute("7")
+    assert game.phase == "discard" and game.pending_discards == {"blue": 5}
+    game.execute("x blue 5")
+    assert game.friendly_blocked("red")          # everyone else has 2 VP: their tiles are protected
+    with pytest.raises(CommandError):
+        game.execute("r 16 blue")
+    opts = CatanEngine(game, rollouts=0).robber_options("red", top=19)
+    assert all(o.hex not in game.friendly_blocked("red") for o in opts)
+    assert game.winner() is None
+    game.execute("rules vp=4")
+    game.execute("devs red 0 0 2")               # 2 settlements + 2 VP cards shown = 4
+    assert game.winner() == "red"
+    g2 = GameState.from_dict(json.loads(json.dumps(game.to_dict())))
+    assert g2.rules == {"vp_target": 4, "discard_limit": 7, "friendly_robber": True}
+
+
+def test_simulator_uses_room_vp_target(game: GameState) -> None:
+    import random as _random
+
+    from catan.catan_engine import _Sim, _SimStatic
+
+    game.execute("12")
+    game.execute("rules vp=4")
+    sim = _Sim(_SimStatic(game.board), game, _random.Random(0))
+    assert sim.win_vp == 4
+    winner = sim.run(game.current, 60)
+    assert len(winner) == 1 and sim.vp(next(iter(winner))) >= 4   # someone reached the room's target

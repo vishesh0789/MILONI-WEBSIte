@@ -291,7 +291,8 @@ class Session:
             "pending_discards": g.pending_discards, "bank": g.bank, "dev_deck": g.dev_deck,
             "players": players, "resources": [r.value for r in RESOURCES],
             "can_undo": any(a["kind"] in REPLAYED for a in self.actions), "feed": self.actions[-150:],
-            "version": self.version, "palette": PLAYER_PALETTE,
+            "version": self.version, "palette": PLAYER_PALETTE, "rules": g.rules, "winner": g.winner(),
+            "friendly_blocked": g.friendly_blocked(g.current_color) if g.phase != "setup" else {},
             "board_warnings": g.board_warnings(),
             # before the first move, autosave.json still holds the last session's game
             "autosave": autosave_info(self.autosave_path) if self.autosave_path and self.version == 0 else None,
@@ -427,6 +428,10 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
                         session.run_command(f"name #{color} {name}".rstrip())
                 if req.get("order") and list(req["order"]) != session.game.order:
                     session.run_command("order " + " ".join("#" + c for c in req["order"]))
+                rules = req.get("rules") or {}
+                if rules and any(session.game.rules.get(k) != v for k, v in rules.items()):
+                    session.run_command(f"rules vp={int(rules['vp_target'])} discard={int(rules['discard_limit'])} "
+                                        f"friendly={'on' if rules.get('friendly_robber') else 'off'}")
                 return done("players updated", problems)
             if self.path == "/api/load":
                 problems = session.replace_game(None, data=req)  # type: ignore[arg-type]
@@ -474,12 +479,24 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(session: Session, port: int) -> tuple[ThreadingHTTPServer, int]:
+def lan_address() -> str | None:
+    """This computer's address on the local network (no traffic is sent)."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("192.168.0.1", 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
+def serve(session: Session, port: int, host: str = "127.0.0.1") -> tuple[ThreadingHTTPServer, int]:
     """Bind to ``port`` or the next free one."""
     last: OSError | None = None
     for p in range(port, port + 20):
         try:
-            return ThreadingHTTPServer(("127.0.0.1", p), make_handler(session)), p
+            return ThreadingHTTPServer((host, p), make_handler(session)), p
         except OSError as exc:
             last = exc
     raise SystemExit(f"no free port between {port} and {port + 19}: {last}")
@@ -492,6 +509,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--resume", action="store_true", help=f"continue the autosaved game ({AUTOSAVE})")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--lan", action="store_true",
+                    help="also allow phones/tablets on the same Wi-Fi to open the board (no password: home networks only)")
     ns = ap.parse_args(argv)
     game = GameState.load(ns.state or EXAMPLE)
     if ns.me:
@@ -503,9 +522,13 @@ def main(argv: list[str] | None = None) -> None:
             print("note:", p)
         if ns.me:
             session.game.perspective = session.game.resolve_player(ns.me)
-    server, port = serve(session, ns.port)
+    server, port = serve(session, ns.port, "0.0.0.0" if ns.lan else "127.0.0.1")
     url = f"http://127.0.0.1:{port}/"
     print(f"Catan analysis board: {url}")
+    if ns.lan:
+        ip = lan_address()
+        print(f"On your phone (same Wi-Fi): http://{ip or '<this computer IP>'}:{port}/")
+        print("Anyone on this network can open it - use --lan only on a network you trust.")
     print("Keep this window open while you play. Press Ctrl+C to stop.")
     if not ns.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
