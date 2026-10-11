@@ -23,13 +23,18 @@ settlements/roads: ``b <player> s <node>`` / ``b <player> r <edge>`` are free,
 the second settlement pays its starting resources, and the turn order follows
 the snake.
 
+Narrated events work too (see ``catan/events.py``): ``white rolls 8``,
+``white rolled 7 -> robber to 11 steal from blue``, ``blue builds road 38``,
+``orange buys dev_card``, ``red plays knight to (0,-1) steal from blue``.
+
 Corrections (joining mid-game, fixing a misread screenshot)::
 
     hand <player> <cards> | <n>      set a hand exactly (``hand red 2w o``) or as n unknown cards
     devs <player> <unplayed> [knights] [vp]   set dev cards held, knights played, VP cards shown
     name <player> <name>             label a player (``name black PrideNL``); names work in commands
     order <p1> <p2> <p3> <p4>        set the turn order
-    rules vp=10 discard=7 friendly=off   room rules: VP to win, discard limit, friendly robber
+    rules vp=10 discard=7 friendly=off setup=snake   room rules (setup=free: any placement order)
+    first <player>                   who goes first (else: whoever places the first settlement)
     tile <hex> [terrain] [number] [robber]   ``tile 4 hills 6``, ``tile 9 desert``, ``tile 4 robber``
     port <edge|a-b> <3:1|res|none>   set or remove the port on a coastal edge
     piece <node|a-b|eN> <player|none> [city]   place/remove a piece without rules or costs
@@ -67,7 +72,7 @@ from .board import (
     SCHEMA_VERSION, Board, BoardValidationError, Port, Resource, Terrain, parse_resource,
 )
 
-DEFAULT_RULES: dict[str, Any] = {"vp_target": 10, "discard_limit": 7, "friendly_robber": False}
+DEFAULT_RULES: dict[str, Any] = {"vp_target": 10, "discard_limit": 7, "friendly_robber": False, "snake_setup": True}
 
 COMMAND_HELP = __doc__.split("Every command is parsed")[0].strip()
 
@@ -337,6 +342,7 @@ class GameState:
     last_roll: int | None = None
     names: dict[str, str] = field(default_factory=dict)   # player colour -> display name
     rules: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_RULES))
+    order_locked: bool = False            # True once the first player is known (set, deduced or after setup)
     _history: list["GameState"] = field(default_factory=list, repr=False)
 
     # -- construction ------------------------------------------------------
@@ -393,6 +399,7 @@ class GameState:
         game.perspective = data.get("perspective")
         game.names = {c: str(n) for c, n in (data.get("names") or {}).items() if c in game.players}
         game.rules = {**DEFAULT_RULES, **{k: v for k, v in (data.get("rules") or {}).items() if k in DEFAULT_RULES}}
+        game.order_locked = bool(data.get("order_locked")) or any(p.buildings() for p in game.players.values())
         game.phase = data.get("phase", "main")
         game.pending_discards = {k: int(v) for k, v in data.get("pending_discards", {}).items()}
         game.last_roll = data.get("last_roll")
@@ -418,6 +425,7 @@ class GameState:
         out["perspective"] = self.perspective
         out["names"] = self.names
         out["rules"] = self.rules
+        out["order_locked"] = self.order_locked
         out["players"] = [
             {"color": c, "settlements": sorted(p.settlements), "cities": sorted(p.cities),
              "roads": sorted(p.roads), "dev_cards": p.dev_hidden,
@@ -461,6 +469,24 @@ class GameState:
             return None
         return "settlement" if b <= r and b < 2 else "road"
 
+    def setup_round(self) -> int | None:
+        """1 or 2 while placing initial pieces (snake draft), None afterwards."""
+        if not self.setup_next():
+            return None
+        return 1 if any(len(p.roads) == 0 for p in self.players.values()) else 2
+
+    def _rotate_to(self, first: str) -> None:
+        """Make ``first`` player 1 while keeping the seating order (hands follow their players)."""
+        i = self.order.index(first)
+        self._reorder(self.order[i:] + self.order[:i])
+
+    def _reorder(self, new: list[str]) -> None:
+        cur = self.current_color
+        idx = [self.order.index(c) for c in new]
+        self.belief.states = {tuple(s[i] for i in idx): w for s, w in self.belief.states.items()}
+        self.order = list(new)
+        self.current = new.index(cur)
+
     def _refresh_setup(self) -> str:
         nxt = self.setup_next()
         if nxt:
@@ -468,9 +494,20 @@ class GameState:
             self.current = self.idx(nxt[0])
             return ""
         if self.phase == "setup":
+            # Round 2 is complete: the regular cycle starts with player 1 and the order is locked.
             self.phase, self.current, self.turn_number, self.last_roll = "main", 0, 1, None
-            return f" - setup complete, {self.current_color} to roll"
+            self.order_locked = True
+            return (f" - setup complete; turn order locked: {' -> '.join(self.label(c) for c in self.order)}; "
+                    f"{self.label(self.current_color)} to roll")
         return ""
+
+    def _ev_set_first(self, ev: Mapping[str, Any]) -> str:
+        if any(p.buildings() or p.roads for p in self.players.values()):
+            raise CommandError("setup has already started - use 'order' to change the turn order")
+        self._rotate_to(ev["player"])
+        self.order_locked = True
+        self._refresh_setup()
+        return "turn order: " + " -> ".join(self.label(c) for c in self.order)
 
     def board_warnings(self) -> list[str]:
         try:
@@ -528,13 +565,14 @@ class GameState:
         rules = dict(self.rules)
         for k, v in ev["rules"].items():
             if k not in DEFAULT_RULES:
-                raise CommandError(f"unknown rule '{k}' (vp, discard, friendly)")
-            rules[k] = bool(v) if k == "friendly_robber" else int(v)
+                raise CommandError(f"unknown rule '{k}' (vp, discard, friendly, setup)")
+            rules[k] = bool(v) if k in ("friendly_robber", "snake_setup") else int(v)
         if not 3 <= rules["vp_target"] <= 30 or not 3 <= rules["discard_limit"] <= 30:
             raise CommandError("VP target and discard limit must be between 3 and 30")
         self.rules = rules
         return (f"rules: {rules['vp_target']} VP to win, discard above {rules['discard_limit']} cards, "
-                f"friendly robber {'on' if rules['friendly_robber'] else 'off'}")
+                f"friendly robber {'on' if rules['friendly_robber'] else 'off'}, "
+                f"setup {'snake draft' if rules['snake_setup'] else 'any order'}")
 
     def label(self, color: str) -> str:
         return f"{self.names[color]} ({color})" if self.names.get(color) else color
@@ -729,7 +767,18 @@ class GameState:
 
     # -- event application ---------------------------------------------------
     def execute(self, line: str) -> str:
-        """Parse and apply one short command; returns a human-readable result."""
+        """Apply one input line: a narrated event ("white rolls 8", "blue builds road 38", ...)
+        or a short command ("8", "b blue r 38", ...).  Returns a human-readable result."""
+        from .events import ParseError, looks_natural, parse_natural
+
+        if looks_natural(line):
+            try:
+                events = parse_natural(line, self)
+            except (ParseError, ValueError) as exc:
+                raise CommandError(str(exc)) from exc
+            msg = self.apply_events(events)
+            self.log.append(f"T{self.turn_number} {line.strip()}")
+            return msg
         event = parse_command(line, self)
         if event["type"] == "undo":
             return "undone" if self.undo() else "nothing to undo"
@@ -782,7 +831,33 @@ class GameState:
         if not 2 <= roll <= 12:
             raise CommandError("roll must be 2..12")
         self._setup_guard("roll")
+        prefix = self._advance_for_roll(ev.get("player"))
         self.last_roll = roll
+        msg = self._roll_effects(roll)
+        return prefix + msg
+
+    def _advance_for_roll(self, player: str | None) -> str:
+        """A roll starts a turn: move the turn on to the roller (or to the next player)."""
+        if self.phase in ("discard", "robber"):
+            raise CommandError("finish the 7 first (discards, then move the robber)")
+        if player is None:
+            if self.last_roll is None:
+                return ""
+            self._ev_next_turn({})                      # bare roll after a roll = next player's turn
+            return f"[{self.label(self.current_color)}'s turn] "
+        if player == self.current_color:
+            if self.last_roll is not None:
+                raise CommandError(f"{self.label(player)} already rolled this turn - type n to end it first")
+            return ""
+        skipped = []
+        while self.current_color != player:
+            self._ev_next_turn({})
+            if self.current_color != player:
+                skipped.append(self.label(self.current_color))
+        note = f" (skipped {', '.join(skipped)})" if skipped else ""
+        return f"[{self.label(player)}'s turn{note}] "
+
+    def _roll_effects(self, roll: int) -> str:
         if roll == 7:
             limit = int(self.rules["discard_limit"])
             self.pending_discards = {c: self.hand_total(c) // 2 for c in self.order
@@ -934,10 +1009,27 @@ class GameState:
         return f"{color} {item} on node {node} (VP {self.public_vp(color)})"
 
     def _setup_build(self, ev: Mapping[str, Any]) -> str:
-        """Free setup placement; the second settlement pays its starting resources."""
+        """Setup placement (free). Snake draft: 1->2->3->4 then 4->3->2->1, settlement then road.
+
+        The first settlement placed decides player 1 unless the first player was set; the
+        second settlement pays its starting resources.
+        """
         color, item = ev["player"], ev["item"]
         ps = self.players[color]
         note = ""
+        if self.rules.get("snake_setup", True):
+            nothing_placed = not any(p.buildings() or p.roads for p in self.players.values())
+            if nothing_placed and not self.order_locked and item == "settlement" and color != self.order[0]:
+                self._rotate_to(color)
+                note = f" (first placement: {self.label(color)} is player 1; order " + \
+                    " -> ".join(self.label(c) for c in self.order) + ")"
+            if nothing_placed:
+                self.order_locked = True
+            expected = self.setup_next()
+            if expected and expected != (color, item):
+                rnd = self.setup_round()
+                raise CommandError(f"snake draft (round {rnd}): next is {self.label(expected[0])} placing a "
+                                   f"{expected[1]} - or use 'rules setup=free' to place in any order")
         if item == "settlement":
             node = int(ev["target"])
             if not 0 <= node < self.board.topology.num_nodes:
@@ -1082,12 +1174,8 @@ class GameState:
         new = list(ev["order"])
         if sorted(new) != sorted(self.order):
             raise CommandError(f"the new order must list each player once: {', '.join(self.order)}")
-        cur = self.current_color
-        old_states = self.belief.states
-        idx = [self.order.index(c) for c in new]
-        self.belief.states = {tuple(s[i] for i in idx): w for s, w in old_states.items()}
-        self.order = new
-        self.current = new.index(cur)
+        self._reorder(new)
+        self.order_locked = True
         if self.phase == "setup":
             self._refresh_setup()
         return "turn order: " + ", ".join(self.label(c) for c in new)
@@ -1335,16 +1423,24 @@ def parse_command(line: str, game: GameState) -> dict[str, Any]:
         return {"type": "set_name", "player": game.resolve_player(args[0]), "name": " ".join(raw)}
     if cmd == "rules":
         keys = {"vp": "vp_target", "target": "vp_target", "discard": "discard_limit", "limit": "discard_limit",
-                "friendly": "friendly_robber"}
+                "friendly": "friendly_robber", "setup": "snake_setup"}
         out: dict[str, Any] = {}
         for a in args:
             k, _, v = a.partition("=")
             if k not in keys or not v:
-                raise CommandError("usage: rules vp=10 discard=7 friendly=on")
-            out[keys[k]] = v in ("on", "yes", "true", "1") if keys[k] == "friendly_robber" else int(v)
+                raise CommandError("usage: rules vp=10 discard=7 friendly=on setup=snake")
+            if keys[k] == "snake_setup":
+                if v not in ("snake", "free", "any"):
+                    raise CommandError("setup=snake (standard draft) or setup=free (any order)")
+                out[keys[k]] = v == "snake"
+            else:
+                out[keys[k]] = v in ("on", "yes", "true", "1") if keys[k] == "friendly_robber" else int(v)
         if not out:
             return {"type": "show_rules"}
         return {"type": "set_rules", "rules": out}
+    if cmd == "first":
+        need(1, "first <player>")
+        return {"type": "set_first", "player": game.resolve_player(args[0])}
     if cmd == "order":
         need(len(game.order), "order <player> <player> ... (every player once)")
         return {"type": "set_order", "order": [game.resolve_player(a) for a in args]}
@@ -1417,7 +1513,7 @@ def repl(game: GameState, *, engine_factory: Any = None) -> None:  # pragma: no 
             if out:
                 print(out)
         except (CommandError, KeyError, ValueError) as exc:
-            print(f"error: {exc}")
+            print(f"error: {str(exc).strip(chr(39) + chr(34))}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover - interactive
@@ -1428,12 +1524,15 @@ def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover - inter
     ap = argparse.ArgumentParser(description="Catan live state tracker")
     ap.add_argument("state", help="board/game JSON (from vision_extractor or saved state)")
     ap.add_argument("--me", help="your colour (perspective)")
-    ap.add_argument("--rollouts", type=int, default=60)
+    ap.add_argument("--engine", choices=["fast", "sim"], default="fast",
+                    help="fast: bitboard expectimax (ms, few MB, default); sim: Monte Carlo rollouts")
+    ap.add_argument("--rollouts", type=int, default=60, help="games per candidate with --engine sim")
     ns = ap.parse_args(argv)
     game = GameState.load(ns.state)
     if ns.me:
         game.perspective = game.resolve_player(ns.me)
-    repl(game, engine_factory=lambda g: CatanEngine(g, rollouts=ns.rollouts))
+    repl(game, engine_factory=lambda g: CatanEngine(g, rollouts=ns.rollouts if ns.engine == "sim" else 0,
+                                                    mode=ns.engine))
 
 
 if __name__ == "__main__":  # pragma: no cover

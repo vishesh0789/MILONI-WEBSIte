@@ -138,7 +138,12 @@ def main() -> int:
     run(game, f"r {best['hex']} {best.get('victim', '')}".strip())
     print(game.summary())
 
-    banner("4. AI: top 3 recommended moves")
+    banner("4. AI: top 3 recommended moves (fast expectimax)")
+    t0 = time.time()
+    print(CatanEngine(game, mode="fast").recommend(top_k=3).render())
+    print(f"(engine time {(time.time() - t0) * 1000:.0f} ms)")
+
+    banner("4b. Second opinion: Monte Carlo rollouts")
     t0 = time.time()
     rec = CatanEngine(game, rollouts=ns.rollouts).recommend(top_k=3)
     print(rec.render())

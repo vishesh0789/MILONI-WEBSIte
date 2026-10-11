@@ -98,6 +98,7 @@ class Recommendation:
     win_prob: float
     all_win_probs: dict[str, float]
     notes: list[str] = field(default_factory=list)
+    engine: str = "sim"
 
     @property
     def best(self) -> Move:
@@ -117,7 +118,9 @@ class Recommendation:
                          + (f" | {m.detail}" if m.detail else ""))
         if self.all_win_probs:
             lines.append("Table win %: " + ", ".join(f"{c} {p * 100:.1f}%" for c, p in self.all_win_probs.items()))
-        if any(m.win_prob is not None for m in self.moves):
+        if self.engine == "fast":
+            lines.append("ranking: expectimax value over your next roll; win % is a fast estimate")
+        elif any(m.win_prob is not None for m in self.moves):
             lines.append("ranking: Monte Carlo win %; heuristic breaks ties within half a standard error")
         lines.extend(f"note: {n}" for n in self.notes)
         return "\n".join(lines)
@@ -131,9 +134,12 @@ class Recommendation:
 class CatanEngine:
     def __init__(self, game: GameState, *, rollouts: int = 80, seed: int = 7,
                  max_rounds: int = 60, mc_top_k: int = 5,
-                 should_stop: Callable[[], bool] | None = None):
+                 should_stop: Callable[[], bool] | None = None, mode: str = "sim"):
+        """``mode="fast"``: bitboard expectimax (milliseconds, a few MB); ``"sim"``: heuristic
+        shortlist re-ranked by Monte Carlo rollouts (``rollouts`` games per candidate)."""
         self.game = game
         self.should_stop = should_stop
+        self.mode = mode
         self.rollouts = rollouts
         self.seed = seed
         self.max_rounds = max_rounds
@@ -410,6 +416,9 @@ class CatanEngine:
 
     def softmax_win(self, game: GameState | None = None) -> dict[str, float]:
         g = game or self.game
+        if self.mode == "fast":  # calibrated: sharpness grows as the leader nears the target
+            from .fast_engine import FastEngine
+            return FastEngine(g).win_estimate()
         scores = {c: self.position_score(c, g) for c in g.order}
         m = max(scores.values())
         exps = {c: math.exp(1.2 * (s - m)) for c, s in scores.items()}
@@ -636,6 +645,8 @@ class CatanEngine:
         else:
             if color != g.current_color:
                 notes.append(f"advising {color} as if it were their turn")
+            if self.mode == "fast" and g.phase == "main":
+                return self._recommend_fast(color, top_k, notes)
             moves = self._candidates(color)
         # Heuristic pass.
         base = self.position_score(color)
@@ -685,6 +696,27 @@ class CatanEngine:
             win_probs = self.softmax_win()
         ps = self.position_score(color)
         return Recommendation(color, g.phase, moves[:top_k], ps, win_probs.get(color, 0.0), win_probs, notes)
+
+    def _recommend_fast(self, color: str, top_k: int, notes: list[str]) -> Recommendation:
+        from .fast_engine import FastEngine
+
+        fe = FastEngine(self.game)
+        ranked = fe.recommend(color, top_k=max(top_k, 5))
+        base = fe.evaluate(color)
+        moves = []
+        for r in ranked:
+            m = Move(r["label"], r["events"], heuristic=r["delta"],
+                     detail=f"expectimax {r['value']:.2f}" + ("" if r["events"] else f" · {self._saving_hint(color, self._acting_hand(color))}"))
+            if any(ev.get("item") == "devcard" for ev in r["events"]):
+                m.kind = "devcard"
+            if r.get("offer"):
+                m.kind, m.offer = "offer", r["offer"]
+                m.detail = f"toward {r['goal']}; partner must accept · +{r['if_accepted']:.2f} if accepted"
+            win = fe.win_estimate({color: base + r["delta"]})
+            m.win_prob = win[color]
+            moves.append(m)
+        table = fe.win_estimate({color: base + ranked[0]["delta"]}) if ranked else fe.win_estimate()
+        return Recommendation(color, self.game.phase, moves[:top_k], base, table[color], table, notes, engine="fast")
 
     def suggest_discard(self, color: str, n: int) -> list[int]:
         hand = self._acting_hand(color)

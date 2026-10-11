@@ -555,6 +555,7 @@ def test_vision_on_real_colonist_screenshot(variant: str) -> None:
 
 def test_names_order_and_free_setup_order(blank: GameState) -> None:
     g = blank
+    g.execute("rules setup=free")       # the snake draft is the default; this room places in any order
     g.execute("name blue Coron")
     assert g.resolve_player("coron") == "blue" and g.resolve_player("#blue") == "blue"
     g.execute("b coron s 0")            # blue first, not red: any order is fine
@@ -639,7 +640,7 @@ def test_room_rules_discard_limit_friendly_robber_and_winner(game: GameState) ->
     game.execute("devs red 0 0 2")               # 2 settlements + 2 VP cards shown = 4
     assert game.winner() == "red"
     g2 = GameState.from_dict(json.loads(json.dumps(game.to_dict())))
-    assert g2.rules == {"vp_target": 4, "discard_limit": 7, "friendly_robber": True}
+    assert g2.rules == {"vp_target": 4, "discard_limit": 7, "friendly_robber": True, "snake_setup": True}
 
 
 def test_simulator_uses_room_vp_target(game: GameState) -> None:
@@ -653,3 +654,111 @@ def test_simulator_uses_room_vp_target(game: GameState) -> None:
     assert sim.win_vp == 4
     winner = sim.run(game.current, 60)
     assert len(winner) == 1 and sim.vp(next(iter(winner))) >= 4   # someone reached the room's target
+
+
+# -- snake draft, narrated events, fast engine ----------------------------------------------
+
+
+def test_snake_draft_deduces_first_player_and_locks_order(blank: GameState) -> None:
+    g = blank
+    g.execute("b blue s 0")                      # blue places first -> blue is player 1
+    assert g.order == ["blue", "orange", "white", "red"]
+    with pytest.raises(CommandError):
+        g.execute("b red s 20")                  # blue still owes a road
+    plan = [("blue", "r 0-3"), ("orange", "s 40"), ("orange", "r 40-45"), ("white", "s 14"), ("white", "r 14-9"),
+            ("red", "s 20"), ("red", "r 20-26"),                       # round 2 starts with the last player again
+            ("red", "s 31"), ("red", "r 31-25"), ("white", "s 48"), ("white", "r 48-44"),
+            ("orange", "s 17"), ("orange", "r 17-22"), ("blue", "s 28"), ("blue", "r 28-34")]
+    for who, what in plan:
+        assert g.setup_next()[0] == who
+        g.execute(f"b {who} {what}")
+    assert g.phase == "main" and g.current_color == "blue" and g.order_locked
+    assert g.hand_total("red") == 3              # node 31's three tiles, from the second settlement only
+    msg = g.execute("8")
+    assert g.current_color == "blue" and "rolled 8" in msg
+    g.execute("orange rolls 6")                  # a named roll moves the turn on
+    assert g.current_color == "orange"
+    assert_conservation(g)
+
+
+def test_first_player_can_be_set_before_setup(blank: GameState) -> None:
+    blank.execute("first white")
+    assert blank.order == ["white", "red", "blue", "orange"] and blank.setup_next() == ("white", "settlement")
+    with pytest.raises(CommandError):
+        blank.execute("b red s 20")
+
+
+def test_narrated_events(game: GameState) -> None:
+    game.execute("name orange Derbe")
+    game.execute("red rolls 8")
+    assert game.expected_hand("red")[4] == 3
+    game.execute("blue rolls 6")
+    assert game.current_color == "blue"
+    game.execute("derbe rolled 7 -> robber to (2,0) steal from red ore")      # hex 11 by axial coordinate
+    assert game.board.robber_hex == 11 and game.current_color == "orange" and game.phase == "main"
+    assert game.expected_hand("orange")[4] == 2
+    game.execute("orange trades 4 wheat for ore") if game.expected_hand("orange")[3] >= 4 else None
+    game.execute("white rolls 4")
+    game.execute("g white wood brick")
+    game.execute("white builds road 12-17")
+    assert game.board.topology.edge_between(12, 17) in game.players["white"].roads
+    game.execute("g white sheep wheat ore")
+    game.execute("white buys dev_card")
+    assert game.players["white"].dev_hidden == 1
+    game.execute("white plays knight to hex 6 steal from red")
+    assert game.board.robber_hex == 6 and game.players["white"].knights_played == 1
+    game.execute("white ends turn")
+    assert game.current_color == "red"
+    with pytest.raises(CommandError):
+        game.execute("red rolls 15")
+    with pytest.raises(CommandError):
+        game.execute("someone does something rolls")
+    assert_conservation(game)
+
+
+def test_short_commands_still_win_over_narration(game: GameState) -> None:
+    game.execute("tile 9 robber")                # contains "robber" but is a short command
+    game.execute("rules discard=9")
+    assert game.rules["discard_limit"] == 9
+
+
+def test_fast_engine_speed_memory_and_choice(game: GameState) -> None:
+    import time
+    import tracemalloc
+
+    from catan.fast_engine import FastEngine
+
+    game.execute("g red 2wheat 2ore")
+    game.execute("12")
+    t0 = time.perf_counter()
+    rec = CatanEngine(game, mode="fast").recommend(top_k=3)
+    assert time.perf_counter() - t0 < 1.0                         # sub-second (typically ~20 ms)
+    assert rec.engine == "fast" and "City" in rec.best.label
+    tracemalloc.start()
+    FastEngine(game).recommend("red")
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 20 * 1024 * 1024                                # far under the 500 MB budget
+    est = FastEngine(game).win_estimate()
+    assert abs(sum(est.values()) - 1) < 1e-9
+
+
+def test_fast_engine_offers_table_trade_one_card_short(game: GameState) -> None:
+    game.execute("12")
+    game.execute("hand red 3wheat 2ore")
+    rec = CatanEngine(game, mode="fast").recommend("red", top_k=5)
+    offers = [m for m in rec.moves if m.kind == "offer"]
+    assert offers and offers[0].label == "Offer Trade: 1 wheat for 1 ore"
+    assert offers[0].offer == {"give": [0, 0, 0, 1, 0], "get": [0, 0, 0, 0, 1]}
+    assert rec.best.kind == "offer"                               # nothing else gets red closer this turn
+
+
+def test_bitboard_legal_spots_match_rules(game: GameState) -> None:
+    from catan.fast_engine import FastEngine, bits
+
+    game.execute("g red 5w 5b")
+    for e in (38, 47):
+        game.execute(f"b red road {e}")
+    fe = FastEngine(game)
+    pos = fe.pos["red"]
+    assert set(bits(fe.legal_settlements("red", pos, fe.occupied()))) == set(game.legal_settlement_nodes("red"))

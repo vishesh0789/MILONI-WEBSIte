@@ -6,8 +6,10 @@ A modular Python system for 4-player Settlers of Catan on the Colonist.io base m
 |---|---|---|
 | Geometry core | `catan/board.py` | Cube/axial hex coordinates, node and edge numbering, `Board` model, validation |
 | 1. Vision | `catan/vision_extractor.py` | Screenshot → validated board JSON (tiles, numbers, ports, robber, pieces) |
-| 2. State | `catan/state_manager.py` | Short-command input, bank/hand tracking, hidden-information belief |
-| 3. AI | `catan/catan_engine.py` | Heuristic evaluation + Monte Carlo rollouts → top-N moves |
+| 2. State | `catan/state_manager.py` | Snake-draft turn manager, short commands, bank/hand tracking, hidden-information belief |
+| 2b. Events | `catan/events.py` | Narrated event lines (`white rolled 7 -> robber to 11 steal from blue`) → events |
+| 3. AI | `catan/fast_engine.py` | Default: bitboard linear evaluation + depth-2 expectimax (~15 ms, ~15 MB) |
+| 3b. AI | `catan/catan_engine.py` | Advice front end; optional Monte Carlo rollouts for a deeper second opinion |
 | Schema | `catan/board_schema.json` | JSON Schema for the extracted board/state |
 | GUI | `catan/gui_server.py`, `catan/gui/index.html` | Analysis board in the browser (Stockfish/lichess style) |
 | Demo | `run_demo.py`, `examples/example_board.json` | Load → `d 6`, `d 8`, `d 7` → AI top 3 |
@@ -42,8 +44,10 @@ once). Other ways to run it:
 ```bash
 python -m catan.gui_server --me red      # the analysis board (what start.command runs)
 python -m catan.state_manager board.json --me red   # keyboard-only tracker in the terminal
+python -m catan.state_manager board.json --engine sim --rollouts 120   # Monte Carlo advice instead
+python -m catan.fast_engine              # benchmark the fast engine (time and memory)
 python run_demo.py [--vision]            # scripted demo: d 6, d 8, d 7 and AI advice
-python -m pytest                         # 50 tests
+python -m pytest                         # 57 tests
 ```
 
 ## Analysis board GUI
@@ -58,9 +62,11 @@ A local server (standard library only) opens a browser page that drives the same
   * After a screenshot the board opens in **Edit board** mode so you can fix misreads. Click a
     tile to change its terrain, number or the robber; a coastal edge for its port; a corner or
     edge to place or remove pieces of any colour.
-* **Setup.** While players have fewer than two settlements and roads, clicks place pieces for
-  free, in any order and for whichever player you select. The second settlement pays its starting
-  cards, and the engine ranks placements for the selected player with rings on the board.
+* **Setup (snake draft).** Click the row of whoever places first, then their settlement: the turn
+  order rotates to start with them and locks. From then on the board follows 1→2→3→4, 4→3→2→1
+  and always places for the player whose pick it is. The second settlement pays its starting
+  cards, and the engine rings the best spots. Untick **Snake draft** in Players to place in any
+  order for any player instead.
 * **Each turn.**
   * Click the number rolled (or type it), then click the board for builds: a corner for a
     settlement (your own settlement becomes a city), an edge for a road, a tile for the robber
@@ -78,10 +84,10 @@ A local server (standard library only) opens a browser page that drives the same
     another player.
   * Click a card count to add or remove that card. ✎ sets a whole hand (exact, or just a count),
     unplayed dev cards, knights played and VP cards shown.
-  * The selected player stays selected until you change it, and setup can be placed in any
-    order.
+  * The selected player stays selected until you change it (in a snake-draft setup the draft
+    picks the player).
   * The engine never moves on its own: ▶ play needs a second click to apply.
-* **Room rules.** In the Players dialog, set VP to win, the discard limit and friendly robber to
+* **Room rules.** In the Players dialog, set VP to win, the discard limit, friendly robber and snake/free setup to
   match your Colonist room. The tracker enforces them (discards, protected tiles), the engine
   plans and simulates with them, and a banner shows when someone reaches the target.
 * **Editable game log.** Every move has **✕ delete** and **↶ back to here**.
@@ -229,16 +235,46 @@ terrain colours for an unusual theme.
 | `devs <player> <unplayed> [knights] [vp]` | `devs blue 2 1 0` | Set dev cards held, knights already played, VP cards shown |
 | `name <player> <name>` | `name black PrideNL` | Name a player; names work in every command |
 | `order <p1> <p2> <p3> <p4>` | `order red blue black orange` | Set the turn order |
-| `rules vp=<n> discard=<n> friendly=on\|off` | `rules vp=12 friendly=on` | Room rules; `rules` alone shows them |
+| `rules vp=<n> discard=<n> friendly=on\|off setup=snake\|free` | `rules vp=12 friendly=on` | Room rules; `rules` alone shows them |
+| `first <player>` | `first blue` | Who places first in setup (otherwise the first settlement decides) |
 | `tile <hex> [terrain] [number] [robber]` | `tile 4 hills 6` | Fix a tile (also `tile 4 robber`) |
 | `port <edge> <type>` | `port 20-26 ore`, `port 12 none` | Set or remove a port on a coastal edge |
 | `piece <node\|a-b> <player\|none> [city]` | `piece 24 red city` | Place or remove a piece without rules or costs |
 | `n`, `me <p>`, `s`, `u`, `ai [p]`, `help`, `save f.json` | | Next turn, set perspective, show, undo, AI advice, all commands, save |
 
-**Setup** is detected automatically while players have fewer than two settlements and roads:
-`b <player> s <node>` and `b <player> r <edge>` are then free, in any order. A road must connect
-to that player's pieces (`piece` places anything anywhere), the second settlement pays its
-starting cards, and dice are refused until setup is complete.
+**Setup (turn manager).** Setup is detected automatically while players have fewer than two
+settlements and roads; `b <player> s <node>` and `b <player> r <edge>` are then free.
+
+* **First player.** `first blue` sets it, or the first settlement placed deduces it: the order
+  rotates to start with that player (`red blue orange white` → `orange white red blue`) and locks.
+* **Snake draft.** Round 1 runs P1→P4 (settlement then road each), round 2 runs P4→P1. An
+  out-of-turn placement is refused with who is next (`snake draft (round 2): next is White placing
+  a road`). `rules setup=free` allows any order instead.
+* **Starting resources** come from the second settlement only.
+* **After round 2** the order is locked P1→P4, P1 is to roll and turn 1 begins. Dice are refused
+  until setup is complete.
+* A road must connect to that player's pieces (`piece` places anything anywhere).
+
+**Turns.** A bare roll (`8`) after a roll ends the current turn and rolls for the next player. A
+named roll (`white rolls 8`) advances to White, noting anyone skipped. The same player rolling twice
+is refused, as is any roll while discards or the robber are pending.
+
+**Narrated events (`events.py`).** Any line that doesn't start with a short command is read as
+narration. Parts can be chained with `->`, `;` or `then`, and the subject carries over:
+
+```
+white rolls 8
+white rolled 7 -> robber to 11 steal from blue          (… steal from blue wood   if you saw it)
+white rolled 7 -> robber to (0,-1) steal from blue      (axial (q,r) or cube q,r,s also work)
+blue discards 2 wood brick ore      /   blue discards 4  (unknown cards)
+blue builds road 38    blue builds road 26-32    blue builds settlement 24    blue upgrades 24
+orange buys dev_card   orange buys dev card knight       (type only if it's you)
+red plays knight to 11 steal from blue    red plays monopoly wheat    red plays year of plenty ore ore
+red plays road building 38 44   red trades 4 wood for ore   red trades 2 wood with blue for ore
+red ends turn
+```
+
+Players can be named by colour, a unique colour prefix or their name.
 
 Resource aliases: `w`/wood, `b`/brick, `s`/sheep, `g`/wheat (grain), `o`/ore. Counts can be written
 as `2w`, `w:2`, `w+w` or `w,w`. Players accept colour prefixes. In `t`, a lone `w`, `b` or `o` is
@@ -261,7 +297,34 @@ Every command parses to a plain dict event (`parse_command`) applied with `GameS
 A log scraper or websocket bridge can push the same events as JSON:
 `{"type": "roll", "value": 8}`, `{"type": "build", "player": "red", "item": "city", "target": 14}`.
 
-## Module 3: AI engine (`catan_engine.py`)
+## Module 3: AI engine
+
+### Fast engine (default, `fast_engine.py`)
+
+Built for an 8 GB laptop: no numpy in the hot path, everything is Python ints used as bitmasks.
+
+* **Bitboards.** 54 nodes and 72 edges are bits. `BoardBits` (cached per board) holds node
+  neighbour masks, node↔edge masks, ports per node and, per robber position, each node's
+  production vector. Legal settlement spots, the road frontier and occupied nodes are a few
+  `&`/`|` operations.
+* **Linear evaluation** per player:
+  `VP + 4·production(pips × scarcity) + 0.12·diversity + port synergy + 0.06·expansion radius
+  (free spots 0/1/2 roads out, ×0.85 per road) + 0.08·longest-road length + dev-card value +
+  hand value toward goals + VP race pressure (0.35 per VP above target−4)`. Results are memoised.
+* **Search.** Candidates are pruned to the top 3 cities, top 4 settlements, top 3 roads, a dev card,
+  trades that unlock a build, and passing. Each is scored by a depth-2 expectimax: opponents take
+  their expected income, then a chance node over my 11 dice totals (a 7 halves an oversized hand),
+  then the best follow-up build.
+* **Win %.** A softmax over position values whose sharpness grows as the leader nears the target.
+  On test positions it is within about 8 points of the Monte Carlo win rate on average.
+* **Cost.** Roughly 13–20 ms per recommendation, under 0.1 MB allocated per call, about 15 MB process
+  RSS (`python -m catan.fast_engine` prints this on your machine).
+
+The GUI's depth menu has **Fast** (default), **Simulate 80** and **Simulate 200**. Simulate shows
+the fast answer immediately, then replaces it with the Monte Carlo result. In the terminal use
+`--engine sim --rollouts N`.
+
+### Simulation engine (`catan_engine.py`, `mode="sim"`)
 
 * **Settlement scoring.** Pips weighted by board scarcity, a diversity bonus (resources the player
   lacks count more), port synergy (2:1 port × own production of that resource) and expansion reach
@@ -302,12 +365,35 @@ During setup the engine ranks settlement spots (for the second settlement it als
 starting cards) and the roads that point toward the best free spot. Before the roll it recommends
 rolling, or a knight first.
 
+## Hooking the board parser into the engine
+
+```python
+from catan.vision_extractor import BoardVisionExtractor
+from catan.state_manager import GameState
+from catan.catan_engine import CatanEngine
+from catan.fast_engine import FastEngine
+
+board_json = BoardVisionExtractor().extract("screenshot.png").data    # tiles, numbers, ports, robber, pieces
+game = GameState.from_dict(board_json)                               # setup phase if no pieces yet
+game.execute("me red")                                               # your colour
+game.execute("first blue")                                           # optional; else deduced
+game.execute("blue builds settlement 24")                           # narrate or use short commands
+...
+print(CatanEngine(game, mode="fast").recommend().render())           # Optimal Move / Alternative / Win %
+FastEngine(game).recommend("red", top_k=3)                           # raw ranked moves (label, events, value)
+```
+
+The GUI's **Read screenshot** and `python -m catan.state_manager board.json` do exactly this.
+Every recommended move carries its `events`, so applying one is `game.apply_events(move["events"])`.
+
 ## Limitations
 
 * Before the roll the only advice is to roll (or play a knight first). In Catan you can't build
   before rolling.
 * Vision is verified on one real Colonist board (plus synthetic renders). Piece detection has not
   been tested on real Colonist pieces yet; see the vision section.
+* The fast engine looks one turn ahead (my move, the dice, my best follow-up); it does not model
+  opponents' builds or trades beyond their expected income. Use Simulate for a deeper check.
 * The rollout policy is greedy and simplified. Player trades are basic: 1-for-1, accepted half the
   time, and refused to anyone within 2 VP of winning. Monopoly and YOP use a basic policy. Win % is
   a strength signal between moves, not a calibrated probability.

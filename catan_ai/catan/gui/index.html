@@ -220,11 +220,10 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
     <span class="group"><select id="opt-me" title="Your colour: your own hand is tracked exactly"></select></span>
     <span class="group">
       <label class="toggle" for="opt-live" title="Re-analyse after every move"><input type="checkbox" id="opt-live" checked> Engine</label>
-      <select id="opt-depth" title="How many simulated games per candidate move">
-        <option value="0">Instant</option>
-        <option value="40">Fast</option>
-        <option value="80" selected>Normal</option>
-        <option value="200">Deep</option>
+      <select id="opt-depth" title="Fast: expectimax in milliseconds. Simulate: Monte Carlo games per move (slower, more memory)">
+        <option value="0" selected>Fast</option>
+        <option value="80">Simulate 80</option>
+        <option value="200">Simulate 200</option>
       </select>
     </span>
     <span class="group">
@@ -285,7 +284,7 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
     <ol>
       <li><b>Get the board in.</b> Use <i>New game ▾ → Random board</i> to practise, or <i>Open ▾ → Read Colonist screenshot</i> (or drag a screenshot onto the board) for a real game. After a screenshot, the board opens in <b>Edit board</b> mode: click anything that was read wrong.</li>
       <li><b>Set up the players</b> with <b>Players</b>: colours (black, green… too), names and turn order. Then pick yourself in the <i>Me</i> menu so your own hand is tracked exactly.</li>
-      <li><b>Setup, in any order.</b> Click a player row, then click a corner for a settlement and an edge for a road. Switch players whenever you like. The engine rings the best spots for the selected player, and second settlements collect their starting cards.</li>
+      <li><b>Setup (snake draft).</b> Click the first player's row, then a corner for their settlement and an edge for their road; the turn order rotates to start with them and the board follows 1→4 then 4→1. The engine rings the best spots, and second settlements collect their starting cards. Prefer free placement? Players → untick "Snake draft".</li>
       <li><b>Play along.</b> Each turn click the number rolled, click the board for whatever was built, and press <b>End turn</b>. <b>Trade</b> and <b>Dev card</b> cover the rest. The engine updates after every move; <b>▶ play</b> applies a suggestion.</li>
       <li><b>Joining mid-game?</b> Press ✎ next to each player to set their cards and dev cards.</li>
     </ol>
@@ -318,7 +317,10 @@ dialog#help::backdrop { background: rgba(10,14,20,.45); }
       <tr><td><code>p red knight</code> · <code>mono w</code> · <code>yop o o</code> · <code>rb</code> · <code>vp</code></td><td>play a dev card</td></tr>
       <tr><td><code>hand blue 2w o</code> · <code>hand blue 5</code> · <code>devs blue 2 1 0</code></td><td>set a hand (exact, or just a count) · dev cards held, knights played, VP cards shown</td></tr>
       <tr><td><code>name black PrideNL</code> · <code>order red blue black orange</code></td><td>name a player (names work in commands) · set the turn order</td></tr>
-      <tr><td><code>rules vp=12 discard=9 friendly=on</code></td><td>room rules: VP to win, discard limit, friendly robber</td></tr>
+      <tr><td><code>rules vp=12 discard=9 friendly=on setup=snake</code></td><td>room rules: VP to win, discard limit, friendly robber, setup snake/free</td></tr>
+      <tr><td><code>first blue</code></td><td>who places first (otherwise the first settlement decides)</td></tr>
+      <tr><td><code>white rolls 8</code> · <code>white rolled 7 -&gt; robber to 11 steal from blue</code></td><td>narrate events as they happen</td></tr>
+      <tr><td><code>blue builds road 38</code> · <code>orange buys dev card</code> · <code>red plays knight to (0,-1) steal from blue</code></td><td>builds, dev cards, knights; also <code>blue discards 2 wood ore</code>, <code>red trades 4 wood for ore</code></td></tr>
       <tr><td><code>tile 4 hills 6</code> · <code>port 20-26 ore</code> · <code>piece 24 red city</code></td><td>fix the board</td></tr>
       <tr><td><code>n</code> · <code>u</code> · <code>help</code></td><td>end turn · undo · list every command</td></tr>
     </table></div>
@@ -343,8 +345,9 @@ const U = 100; // svg units per hex radius
 let S = null, A = null;
 let actor = null, actorPinned = false;
 let seq = 0, analyzing = false, editMode = false, freeRoads = 0, armed = null;
-const opt = { live: true, heat: true, ids: false, depth: 80 };
+const opt = { live: true, heat: true, ids: false, depth: 0 };
 try { Object.assign(opt, JSON.parse(localStorage.getItem("catan-opts") || "{}")); } catch (e) { /* storage blocked */ }
+if (![0, 80, 200].includes(Number(opt.depth))) opt.depth = 0;   // older saved settings
 const saveOpts = () => { try { localStorage.setItem("catan-opts", JSON.stringify(opt)); } catch (e) { /* ignore */ } };
 
 const $ = (id) => document.getElementById(id);
@@ -382,11 +385,14 @@ function toast(msg, ms = 3200, err = false) {
   toast.t = setTimeout(() => ($("toast-host").innerHTML = ""), ms);
 }
 
+const snakeLocked = () => S.phase === "setup" && S.rules.snake_setup && S.order_locked;
+
 function setState(state) {
   if (!state || state.offline) return;
   if (!S || state.version !== S.version) armed = null;
   S = state;
   if (!S.order.includes(actor)) actorPinned = false;   // the selected player stays selected until you change it
+  if (snakeLocked()) actorPinned = false;            // snake draft: the draft decides who places next
   if (!actorPinned) actor = S.setup_next ? S.setup_next[0] : S.current;
   if (S.phase !== "main") freeRoads = 0;
   renderAll();
@@ -419,12 +425,12 @@ async function analyze() {
   analyzing = true; renderEngine();
   const body = { player: actor, top_k: 5 };
   const deep = opt.depth > 0 && S.phase !== "setup";
-  if (deep) {
-    const quick = await api("/api/analyze", { ...body, rollouts: 0 });
+  if (deep) {   // fast answer first, then the simulation refines it
+    const quick = await api("/api/analyze", { ...body, mode: "fast" });
     if (id !== seq) return;
     if (quick.ok) { A = quick.analysis; A.prelim = true; renderAnalysis(); }
   }
-  const res = await api("/api/analyze", { ...body, rollouts: deep ? opt.depth : 0 });
+  const res = await api("/api/analyze", deep ? { ...body, mode: "sim", rollouts: opt.depth } : { ...body, mode: "fast" });
   if (id !== seq) return;
   analyzing = false;
   if (res.ok) A = res.analysis;
@@ -662,9 +668,11 @@ function playersPop(x, y) {
     <div class="lbl">Room rules (match your Colonist room)</div>
     <div id="rules">${stepperHtml(["vp_target", "discard_limit"], rules, ["VP to win", "discard above"])}</div>
     <label class="toggle" for="r-friendly"><input type="checkbox" id="r-friendly" ${rules.friendly_robber ? "checked" : ""}> Friendly robber (can't rob players with 2 VP or less)</label>
+    <label class="toggle" for="r-snake"><input type="checkbox" id="r-snake" ${rules.snake_setup ? "checked" : ""}> Snake draft setup (1→4 then 4→1; off = place in any order)</label>
     <div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="save">Save</button></div>`, x, y, (el) => {
     bindSteppers(el.querySelector("#rules"), rules, null, () => 30);
     el.querySelector("#r-friendly").addEventListener("change", (ev) => { rules.friendly_robber = ev.target.checked; });
+    el.querySelector("#r-snake").addEventListener("change", (ev) => { rules.snake_setup = ev.target.checked; });
     el.querySelectorAll("[data-colour]").forEach((s2) => s2.addEventListener("change", () => { rows[+s2.dataset.colour].color = s2.value; sync(el); draw(); }));
     onActs(el, {
       upr: (i) => { sync(el); i = +i; [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); },
@@ -901,7 +909,7 @@ function openMenuPop(x, y) {
 // ---------------------------------------------------------------- panels
 function renderStatus() {
   const cur = S.current, ph = S.phase;
-  const what = ph === "setup" ? `setup (any order)` : ph === "main" ? (S.last_roll ? "builds and trades" : "to roll")
+  const what = ph === "setup" ? (S.rules.snake_setup ? `setup · snake round ${S.setup_round || 1}` : `setup (any order)`) : ph === "main" ? (S.last_roll ? "builds and trades" : "to roll")
     : ph === "discard" ? "· discards" : "· moves the robber";
   $("status").innerHTML = `
     <span class="chip">Turn <b>${S.turn}</b></span>
@@ -932,7 +940,14 @@ function renderBanner() {
   } else if (S.phase === "setup") {
     cls = "setup";
     const a = actor || S.current, pend = player(a).pending_setup;
-    html = `<span class="msg"><b>Setup, in any order.</b> Placing for ${dotHtml(a)} <b>${pname(a)}</b>${pend ? `: next a ${pend}` : " (done)"}. Click a player row to place for someone else. Rings show the engine's picks for this player; second settlements collect their starting cards automatically.</span>`;
+    if (!S.rules.snake_setup) {
+      html = `<span class="msg"><b>Setup, in any order.</b> Placing for ${dotHtml(a)} <b>${pname(a)}</b>${pend ? `: next a ${pend}` : " (done)"}. Click a player row to place for someone else. Rings show the engine's picks for this player; second settlements collect their starting cards automatically.</span>`;
+    } else if (!S.order_locked) {
+      html = `<span class="msg"><b>Setup · snake draft.</b> Click the player who places first (row), then their settlement: that sets the turn order (${S.order.map(pname).join(" → ")}, rotated to start there). Placing for ${dotHtml(a)} <b>${pname(a)}</b>.</span>`;
+    } else {
+      const [c, item] = S.setup_next || [a, pend];
+      html = `<span class="msg"><b>Setup · snake round ${S.setup_round || 1}</b> (${S.setup_round === 2 ? [...S.order].reverse().map(pname).join(" → ") : S.order.map(pname).join(" → ")}). Next: ${dotHtml(c)} <b>${pname(c)}</b> places a <b>${item}</b>. Rings show the engine's picks; the second settlement collects its starting cards. Players → untick "Snake draft" to place freely.</span>`;
+    }
   } else if (S.phase === "discard") {
     cls = "alert";
     const picks = A && !isStale() ? A.moves.filter((m) => m.events[0] && m.events[0].type === "discard") : [];
@@ -1002,7 +1017,7 @@ function renderEngine() {
   const bd = $("engine-bd"), stale = isStale();
   const noise = A && A.rollouts ? ` · ±${(100 / Math.sqrt(A.rollouts)).toFixed(0)}%` : "";
   $("engine-meta").innerHTML = analyzing ? `<span class="analyzing"><span class="spinner"></span>${A && A.prelim && !stale ? "quick look done, simulating…" : "thinking…"}</span>`
-    : A ? `${A.rollouts ? A.rollouts + " games per move" : "instant"}${noise} · ${A.seconds}s` : "";
+    : A ? `${A.engine === "fast" ? "fast expectimax" : A.rollouts ? A.rollouts + " games per move" : "instant"}${noise} · ${A.seconds}s` : "";
   if (!A) { bd.innerHTML = `<div class="sub">${opt.live ? "Starting the engine…" : `<button class="btn primary" data-act="analyze">Analyse position</button>`}</div>`; onActs(bd, { analyze }); return; }
   const best = A.moves[0], setup = A.phase === "setup";
   const winTxt = setup ? "Setup" : A.prelim ? "~" + pct(A.win) : pct(A.win);
@@ -1094,6 +1109,7 @@ $("players").addEventListener("click", (e) => {
   const hb = e.target.closest("[data-hand]");
   if (hb) { const [x, y] = anchorOf(hb); return handPop(hb.dataset.hand, x - 320, y); }
   const tr = e.target.closest("tr[data-actor]"); if (!tr) return;
+  if (snakeLocked() && tr.dataset.actor !== actor) return toast(`Snake draft: ${pname(actor)} places next. Untick "Snake draft" in Players to place freely.`, 5000);
   actor = tr.dataset.actor; actorPinned = actor !== S.current;
   renderAll(); if (opt.live) analyze();
 });

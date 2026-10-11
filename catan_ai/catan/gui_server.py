@@ -288,6 +288,7 @@ class Session:
             "robber": g.board.robber_hex,
             "order": g.order, "current": g.current_color, "phase": g.phase, "turn": g.turn_number,
             "last_roll": g.last_roll, "perspective": g.perspective, "setup_next": nxt,
+            "setup_round": g.setup_round() if g.phase == "setup" else None, "order_locked": g.order_locked,
             "pending_discards": g.pending_discards, "bank": g.bank, "dev_deck": g.dev_deck,
             "players": players, "resources": [r.value for r in RESOURCES],
             "can_undo": any(a["kind"] in REPLAYED for a in self.actions), "feed": self.actions[-150:],
@@ -299,7 +300,7 @@ class Session:
             "previous": autosave_info(self.previous_path) if self.previous_path else None,
         }
 
-    def analyze(self, player: str | None, rollouts: int, top_k: int) -> dict[str, Any]:
+    def analyze(self, player: str | None, rollouts: int, top_k: int, mode: str = "fast") -> dict[str, Any]:
         """Runs on a snapshot outside the lock; raises AnalysisCancelled if superseded."""
         with self.lock:
             self.generation += 1
@@ -309,7 +310,8 @@ class Session:
         color = player if player in g.order else None
         t0 = time.time()
         stop = lambda: self.generation != gen  # noqa: E731
-        eng = CatanEngine(g, rollouts=rollouts, should_stop=stop)
+        mode = "fast" if mode == "fast" or rollouts <= 0 else "sim"
+        eng = CatanEngine(g, rollouts=0 if mode == "fast" else rollouts, should_stop=stop, mode=mode)
         rec = eng.recommend(color, top_k=top_k)
         color = rec.player
         heur = CatanEngine(g, rollouts=0)
@@ -328,7 +330,9 @@ class Session:
             "scores": {c: round(heur.position_score(c), 2) for c in g.order},
             "heatmap": heat, "plans": plans,
             "resource_values": heur.resource_values(color),
-            "notes": rec.notes, "rollouts": rollouts if any(m.win_prob is not None for m in rec.moves) else 0,
+            "notes": rec.notes, "engine": rec.engine if rec.engine == "fast" else ("sim" if any(
+                m.win_prob is not None for m in rec.moves) else "heuristic"),
+            "rollouts": eng.rollouts if rec.engine != "fast" and any(m.win_prob is not None for m in rec.moves) else 0,
             "seconds": round(time.time() - t0, 2), "text": rec.render(),
         }
 
@@ -376,8 +380,8 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
                 if self.path == "/api/analyze":
                     req = json.loads(raw or b"{}")
                     try:
-                        analysis = session.analyze(req.get("player"), int(req.get("rollouts", 80)),
-                                                   int(req.get("top_k", 5)))
+                        analysis = session.analyze(req.get("player"), int(req.get("rollouts", 0)),
+                                                   int(req.get("top_k", 5)), req.get("mode", "fast"))
                     except AnalysisCancelled:
                         return self._json({"ok": False, "cancelled": True})
                     return self._json({"ok": True, "analysis": analysis})
@@ -431,7 +435,8 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
                 rules = req.get("rules") or {}
                 if rules and any(session.game.rules.get(k) != v for k, v in rules.items()):
                     session.run_command(f"rules vp={int(rules['vp_target'])} discard={int(rules['discard_limit'])} "
-                                        f"friendly={'on' if rules.get('friendly_robber') else 'off'}")
+                                        f"friendly={'on' if rules.get('friendly_robber') else 'off'} "
+                                        f"setup={'snake' if rules.get('snake_setup', True) else 'free'}")
                 return done("players updated", problems)
             if self.path == "/api/load":
                 problems = session.replace_game(None, data=req)  # type: ignore[arg-type]
